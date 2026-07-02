@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MAP · DB · hub_data.{{ table }}</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, "Apple SD Gothic Neo", sans-serif;
+           margin: 0; padding: 1.5rem; line-height: 1.45; }
+    header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap;
+             border-bottom: 1px solid #8883; padding-bottom: .6rem; margin-bottom: 1rem; }
+    h1 { font-size: 1.1rem; margin: 0; }
+    .muted { color: #8889; font-size: .85rem; }
+    .wrap { overflow-x: auto; }
+    table { border-collapse: collapse; font-size: .82rem; }
+    th, td { text-align: left; padding: .3rem .55rem; border-bottom: 1px solid #8883;
+             white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+    th { color: #8889; font-weight: 600; position: sticky; top: 0; }
+    nav { margin: 1rem 0; display: flex; gap: .75rem; align-items: center; }
+    a.btn { padding: .25rem .7rem; border: 1px solid #8886; border-radius: 6px;
+            text-decoration: none; }
+    a.btn[aria-disabled="true"] { opacity: .4; pointer-events: none; }
+    code { font-size: .9em; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>DB · <code>hub_data.{{ table }}</code></h1>
+    <span class="muted">operator: {{ operator }} · <a href="/">← 대시보드</a></span>
+  </header>
+
+  <p class="muted">
+    총 {{ total }}행 · {{ offset + 1 if rows else 0 }}–{{ offset + rows|length }} 표시
+    (limit {{ limit }})
+  </p>
+
+  <nav>
+    {% set prev = offset - limit if offset - limit >= 0 else 0 %}
+    {% set has_prev = offset > 0 %}
+    {% set has_next = offset + limit < total %}
+    <a class="btn" aria-disabled="{{ 'false' if has_prev else 'true' }}"
+       href="/db/{{ table }}?limit={{ limit }}&offset={{ prev }}">← 이전</a>
+    <a class="btn" aria-disabled="{{ 'false' if has_next else 'true' }}"
+       href="/db/{{ table }}?limit={{ limit }}&offset={{ offset + limit }}">다음 →</a>
+    <span class="muted">offset {{ offset }}</span>
+  </nav>
+
+  <div class="wrap">
+    <table>
+      <thead>
+        <tr>{% for c in columns %}<th>{{ c }}</th>{% endfor %}</tr>
+      </thead>
+      <tbody>
+      {% for row in rows %}
+        <tr>{% for c in columns %}<td title="{{ row[c] }}">{{ row[c] if row[c] is not none else "—" }}</td>{% endfor %}</tr>
+      {% else %}
+        <tr><td colspan="{{ columns|length or 1 }}" class="muted">행 없음</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</body>
+</html>

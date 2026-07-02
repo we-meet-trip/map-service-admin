@@ -1,0 +1,21 @@
+# map-service-admin 런타임 의존성 (cut 1: 읽기전용 모니터링).
+#
+# hub 의존성의 부분집합 + Jinja2. PostGIS/공간 연산(geoalchemy2/shapely),
+# 스케줄러(apscheduler), redis 는 cut 1 에서 불필요하므로 제외한다.
+
+# [Web layer]
+fastapi==0.136.1
+uvicorn[standard]==0.47.0
+httpx==0.28.1
+
+# [Settings]
+pydantic-settings>=2.14.1,<3.0
+
+# [DB] — hub_data 읽기전용 조회
+# sqlalchemy[asyncio]: 비동기 엔진/Core
+# psycopg[binary,pool]: PostgreSQL 드라이버(바이너리 휠, libpq 번들). hub 와 동일 드라이버.
+sqlalchemy[asyncio]>=2.0.49,<3.0
+psycopg[binary,pool]>=3.3.4,<4.0
+
+# [View] — 서버렌더 HTML 대시보드
+jinja2>=3.1.4,<4.0

@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- 30초마다 자동 새로고침(간이 모니터링). 필요 없으면 이 meta 제거 -->
+  <meta http-equiv="refresh" content="30">
+  <title>MAP · 운영 모니터링</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, "Apple SD Gothic Neo", sans-serif;
+           margin: 0; padding: 1.5rem; line-height: 1.5; }
+    header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap;
+             border-bottom: 1px solid #8883; padding-bottom: .75rem; margin-bottom: 1rem; }
+    h1 { font-size: 1.25rem; margin: 0; }
+    .muted { color: #8889; font-size: .85rem; }
+    section { margin: 1.25rem 0; }
+    h2 { font-size: 1rem; margin: 0 0 .5rem; }
+    table { border-collapse: collapse; width: 100%; max-width: 720px; font-size: .9rem; }
+    th, td { text-align: left; padding: .35rem .6rem; border-bottom: 1px solid #8883; }
+    th { color: #8889; font-weight: 600; }
+    .pill { display: inline-block; padding: .1rem .5rem; border-radius: 999px;
+            font-size: .8rem; font-weight: 600; }
+    .up { background: #1a7f37; color: #fff; }
+    .down { background: #b42318; color: #fff; }
+    .err { color: #b42318; font-size: .85rem; }
+    .note { color: #8889; font-size: .8rem; margin-top: .35rem; }
+    code { font-size: .85em; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MAP · 운영 모니터링</h1>
+    <span class="muted">operator: {{ operator }} · 30s 자동 새로고침 · <a href="/docs">/docs</a></span>
+  </header>
+
+  <!-- 서비스 헬스 -->
+  <section>
+    <h2>서비스 헬스 (user / agent / hub)</h2>
+    <table>
+      <thead><tr><th>서비스</th><th>상태</th><th>HTTP</th><th>지연</th><th>URL</th></tr></thead>
+      <tbody>
+      {% for s in health %}
+        <tr>
+          <td>{{ s.service }}</td>
+          <td>{% if s.ok %}<span class="pill up">UP</span>{% else %}<span class="pill down">DOWN</span>{% endif %}</td>
+          <td>{{ s.http_status if s.http_status is not none else "-" }}</td>
+          <td>{{ s.latency_ms ~ " ms" if s.latency_ms is not none else "-" }}</td>
+          <td><code>{{ s.url }}</code>{% if s.error %} <span class="err">({{ s.error }})</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <!-- Gemini 연결 상태 -->
+  <section>
+    <h2>Gemini 연결 상태 <span class="muted">(models.list · 무료 메타 호출)</span></h2>
+    {% if not gemini.configured %}
+      <p><span class="pill down">미설정</span> <span class="muted">{{ gemini.detail }}</span></p>
+    {% elif gemini.ok %}
+      <p><span class="pill up">OK</span>
+        <span class="muted">HTTP {{ gemini.http_status }} · {{ gemini.latency_ms }} ms · 모델 {{ gemini.model_count }}종</span></p>
+    {% else %}
+      <p><span class="pill down">이상</span> <span class="err">{{ gemini.detail }}</span></p>
+    {% endif %}
+  </section>
+
+  <!-- DB 뷰어 (hub_data) -->
+  <section>
+    <h2>DB 뷰어 <span class="muted">(schema: hub_data · 읽기전용 · user_service/langgraph 제외)</span></h2>
+    {% if errors.db_tables %}
+      <p class="err">조회 실패: {{ errors.db_tables }}</p>
+    {% elif db_tables %}
+      <table>
+        <thead><tr><th>테이블</th><th>행수</th><th>보기</th></tr></thead>
+        <tbody>
+        {% for t in db_tables %}
+          <tr><td><code>{{ t.table }}</code></td><td>{{ t.rows }}</td>
+              <td><a href="/db/{{ t.table }}">행 보기 →</a></td></tr>
+        {% else %}
+          <tr><td colspan="3" class="muted">테이블 없음</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="muted">데이터 없음</p>
+    {% endif %}
+  </section>
+
+  <!-- KMA 폴링 현황 -->
+  <section>
+    <h2>KMA 폴링 현황</h2>
+    {% if errors.polling %}
+      <p class="err">조회 실패: {{ errors.polling }}</p>
+    {% elif polling %}
+      <table>
+        <tbody>
+          <tr><th>활성 격자 / 전체</th>
+              <td>{{ polling.grids.active_grids | default(0) }} / {{ polling.grids.total_grids | default(0) }}</td></tr>
+          <tr><th>단기예보 최신 발표(base_at)</th>
+              <td>{{ polling.short_term.last_base_at or "—" }} <span class="muted">({{ polling.short_term.rows | default(0) }} rows)</span></td></tr>
+          <tr><th>중기 육상 최신 발표(tm_fc)</th>
+              <td>{{ polling.mid_land.last_tm_fc or "—" }} <span class="muted">({{ polling.mid_land.rows | default(0) }} rows)</span></td></tr>
+          <tr><th>중기 기온 최신 발표(tm_fc)</th>
+              <td>{{ polling.mid_temp.last_tm_fc or "—" }} <span class="muted">({{ polling.mid_temp.rows | default(0) }} rows)</span></td></tr>
+        </tbody>
+      </table>
+      <p class="note">예보 행이 0이면 KMA_SERVICE_KEY 미설정이거나 폴링 미실행 상태일 수 있습니다.</p>
+    {% else %}
+      <p class="muted">데이터 없음</p>
+    {% endif %}
+  </section>
+
+  <!-- 예보 테이블 행수/만료 -->
+  <section>
+    <h2>예보 테이블 현황</h2>
+    {% if errors.forecast %}
+      <p class="err">조회 실패: {{ errors.forecast }}</p>
+    {% elif forecast %}
+      <table>
+        <thead><tr><th>테이블</th><th>행수</th><th>min(expires_at)</th><th>max(expires_at)</th></tr></thead>
+        <tbody>
+        {% for t in forecast %}
+          <tr><td><code>{{ t.table }}</code></td><td>{{ t.rows | default(0) }}</td>
+              <td>{{ t.min_expires_at or "—" }}</td><td>{{ t.max_expires_at or "—" }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="muted">데이터 없음</p>
+    {% endif %}
+  </section>
+
+  <!-- 장소 후보 -->
+  <section>
+    <h2>장소 후보(places)</h2>
+    {% if errors.places %}
+      <p class="err">조회 실패: {{ errors.places }}</p>
+    {% elif places %}
+      <table>
+        <thead><tr><th>출처(source)</th><th>행수</th></tr></thead>
+        <tbody>
+        {% for s in places.by_source %}
+          <tr><td>{{ s.source }}</td><td>{{ s.rows }}</td></tr>
+        {% else %}
+          <tr><td colspan="2" class="muted">행 없음</td></tr>
+        {% endfor %}
+          <tr><th>합계</th><th>{{ places.total | default(0) }}</th></tr>
+        </tbody>
+      </table>
+      <p class="note">kakao 결과는 Redis L1 캐시로만 다뤄져 places 에는 durunubi 위주로 적재됩니다.</p>
+    {% else %}
+      <p class="muted">데이터 없음</p>
+    {% endif %}
+  </section>
+
+</body>
+</html>
