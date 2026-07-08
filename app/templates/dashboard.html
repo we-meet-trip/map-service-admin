@@ -1,159 +1,497 @@
-<!doctype html>
-<html lang="ko">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <!-- 30초마다 자동 새로고침(간이 모니터링). 필요 없으면 이 meta 제거 -->
-  <meta http-equiv="refresh" content="30">
-  <title>MAP · 운영 모니터링</title>
-  <style>
-    :root { color-scheme: light dark; }
-    body { font-family: system-ui, -apple-system, "Apple SD Gothic Neo", sans-serif;
-           margin: 0; padding: 1.5rem; line-height: 1.5; }
-    header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap;
-             border-bottom: 1px solid #8883; padding-bottom: .75rem; margin-bottom: 1rem; }
-    h1 { font-size: 1.25rem; margin: 0; }
-    .muted { color: #8889; font-size: .85rem; }
-    section { margin: 1.25rem 0; }
-    h2 { font-size: 1rem; margin: 0 0 .5rem; }
-    table { border-collapse: collapse; width: 100%; max-width: 720px; font-size: .9rem; }
-    th, td { text-align: left; padding: .35rem .6rem; border-bottom: 1px solid #8883; }
-    th { color: #8889; font-weight: 600; }
-    .pill { display: inline-block; padding: .1rem .5rem; border-radius: 999px;
-            font-size: .8rem; font-weight: 600; }
-    .up { background: #1a7f37; color: #fff; }
-    .down { background: #b42318; color: #fff; }
-    .err { color: #b42318; font-size: .85rem; }
-    .note { color: #8889; font-size: .8rem; margin-top: .35rem; }
-    code { font-size: .85em; }
-  </style>
-</head>
-<body>
-  <header>
-    <h1>MAP · 운영 모니터링</h1>
-    <span class="muted">operator: {{ operator }} · 30s 자동 새로고침 · <a href="/docs">/docs</a></span>
-  </header>
+{% extends "base.html" %}
+{% block title %}MAP · 운영 모니터링{% endblock %}
+{% block head_extra %}
+  {# JS 미사용 환경에서만 기존 30초 자동 새로고침 동작 보존(강제 meta 제거 대체) #}
+  <noscript><meta http-equiv="refresh" content="30"></noscript>
+{% endblock %}
 
-  <!-- 서비스 헬스 -->
-  <section>
-    <h2>서비스 헬스 (user / agent / hub)</h2>
-    <table>
-      <thead><tr><th>서비스</th><th>상태</th><th>HTTP</th><th>지연</th><th>URL</th></tr></thead>
-      <tbody>
-      {% for s in health %}
-        <tr>
-          <td>{{ s.service }}</td>
-          <td>{% if s.ok %}<span class="pill up">UP</span>{% else %}<span class="pill down">DOWN</span>{% endif %}</td>
-          <td>{{ s.http_status if s.http_status is not none else "-" }}</td>
-          <td>{{ s.latency_ms ~ " ms" if s.latency_ms is not none else "-" }}</td>
-          <td><code>{{ s.url }}</code>{% if s.error %} <span class="err">({{ s.error }})</span>{% endif %}</td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </section>
+{#- ── 상태 표시 매크로 (색 단독 금지 · 글리프+라벨 병기) ───────────────── -#}
+{% macro pill(sev) %}
+  {%- if sev >= 3 -%}<span class="pill s3"><span class="g">✕</span>심각</span>
+  {%- elif sev == 2 -%}<span class="pill s2"><span class="g">◆</span>경계</span>
+  {%- elif sev == 1 -%}<span class="pill s1"><span class="g">▲</span>주의</span>
+  {%- else -%}<span class="pill s0"><span class="g">●</span>정상</span>{%- endif -%}
+{% endmacro %}
+{% macro verdict_word(sev) %}
+  {%- if sev >= 3 -%}장애{%- elif sev == 2 -%}경계{%- elif sev == 1 -%}주의{%- else -%}정상{%- endif -%}
+{% endmacro %}
+{% macro sev_glyph(sev) %}
+  {%- if sev >= 3 -%}✕{%- elif sev == 2 -%}◆{%- elif sev == 1 -%}▲{%- else -%}●{%- endif -%}
+{% endmacro %}
 
-  <!-- Gemini 연결 상태 -->
-  <section>
-    <h2>Gemini 연결 상태 <span class="muted">(models.list · 무료 메타 호출)</span></h2>
-    {% if not gemini.configured %}
-      <p><span class="pill down">미설정</span> <span class="muted">{{ gemini.detail }}</span></p>
-    {% elif gemini.ok %}
-      <p><span class="pill up">OK</span>
-        <span class="muted">HTTP {{ gemini.http_status }} · {{ gemini.latency_ms }} ms · 모델 {{ gemini.model_count }}종</span></p>
-    {% else %}
-      <p><span class="pill down">이상</span> <span class="err">{{ gemini.detail }}</span></p>
-    {% endif %}
-  </section>
+{#- ── 도메인별 심각도 파생 (네임스페이스로 루프 밖 전파) ───────────────
+     임의 임계값(신선도 시간창 등)은 쓰지 않는다 — 자명한 매핑만:
+       서비스: 도달불가→심각, 도달했으나 실패→경계, 정상→정상
+       Gemini: 미설정→주의, 설정됨·실패→경계, 정상→정상
+       조회 실패(errors.<key>)→해당 도메인 심각
+       격자 커버리지 결손/데이터 0 → 주의(정보성) -#}
+{% set ns = namespace(platform=0, weather=0, places=0, database=0) %}
+{% for s in health %}
+  {% if not s.ok %}
+    {% if s.http_status %}{% if ns.platform < 2 %}{% set ns.platform = 2 %}{% endif %}
+    {% else %}{% set ns.platform = 3 %}{% endif %}
+  {% endif %}
+{% endfor %}
+{% if gemini %}
+  {% if gemini.configured and not gemini.ok %}{% if ns.platform < 2 %}{% set ns.platform = 2 %}{% endif %}
+  {% elif not gemini.configured %}{% if ns.platform < 1 %}{% set ns.platform = 1 %}{% endif %}{% endif %}
+{% endif %}
+{% if errors.polling or errors.forecast %}{% set ns.weather = 3 %}
+{% else %}
+  {% if polling and polling.grids and (polling.grids.active_grids | default(0)) < (polling.grids.total_grids | default(0)) %}{% if ns.weather < 1 %}{% set ns.weather = 1 %}{% endif %}{% endif %}
+  {% if polling and polling.grids and (polling.grids.total_grids | default(0)) == 0 %}{% if ns.weather < 1 %}{% set ns.weather = 1 %}{% endif %}{% endif %}
+  {% if forecast %}{% for t in forecast %}{% if (t.rows | default(0)) == 0 %}{% if ns.weather < 1 %}{% set ns.weather = 1 %}{% endif %}{% endif %}{% endfor %}{% endif %}
+{% endif %}
+{% if errors.places %}{% set ns.places = 3 %}{% elif places and (places.total | default(0)) == 0 %}{% set ns.places = 1 %}{% endif %}
+{% if errors.db_tables %}{% set ns.database = 3 %}{% elif not db_tables %}{% set ns.database = 1 %}{% endif %}
+{% set overall = [ns.platform, ns.weather, ns.places, ns.database] | max %}
+{% set svc_up = (health | selectattr('ok') | list) | length %}
+{% set svc_total = health | length %}
+{% set problem_count = [ns.platform, ns.weather, ns.places, ns.database] | select('ge', 2) | list | length %}
+{% set mon_count = monitoring | length %}
 
-  <!-- DB 뷰어 (hub_data) -->
-  <section>
-    <h2>DB 뷰어 <span class="muted">(schema: hub_data · 읽기전용 · user_service/langgraph 제외)</span></h2>
-    {% if errors.db_tables %}
-      <p class="err">조회 실패: {{ errors.db_tables }}</p>
-    {% elif db_tables %}
-      <table>
-        <thead><tr><th>테이블</th><th>행수</th><th>보기</th></tr></thead>
-        <tbody>
-        {% for t in db_tables %}
-          <tr><td><code>{{ t.table }}</code></td><td>{{ t.rows }}</td>
-              <td><a href="/db/{{ t.table }}">행 보기 →</a></td></tr>
-        {% else %}
-          <tr><td colspan="3" class="muted">테이블 없음</td></tr>
-        {% endfor %}
-        </tbody>
-      </table>
-    {% else %}
-      <p class="muted">데이터 없음</p>
-    {% endif %}
-  </section>
+{% block content %}
+<div class="app">
+  {#- ── 좌측 도메인 레일 (목차 + 상태 계기판) ────────────────────────── -#}
+  <aside class="rail">
+    <div class="rail-in">
+      <div class="brand">
+        <span class="mark">MAP</span>
+        <span><span class="bt">운영 모니터링</span><br><span class="bs">operations console</span></span>
+      </div>
+      <nav aria-label="도메인 인덱스">
+        <a href="#platform" data-spy="platform">
+          <span class="rdot s{{ ns.platform }}" aria-hidden="true">{{ sev_glyph(ns.platform) }}</span>
+          <span class="nm">플랫폼 서비스</span><span class="ct">{{ svc_up }} / {{ svc_total }}</span>
+          <span class="visually-hidden">상태 {{ verdict_word(ns.platform) }}</span>
+        </a>
+        <a href="#weather" data-spy="weather">
+          <span class="rdot s{{ ns.weather }}" aria-hidden="true">{{ sev_glyph(ns.weather) }}</span>
+          <span class="nm">기상 파이프라인</span>
+          {% if polling and polling.grids %}<span class="ct">{{ polling.grids.active_grids | default(0) }} / {{ polling.grids.total_grids | default(0) }}</span>{% endif %}
+          <span class="visually-hidden">상태 {{ verdict_word(ns.weather) }}</span>
+        </a>
+        <a href="#places" data-spy="places">
+          <span class="rdot s{{ ns.places }}" aria-hidden="true">{{ sev_glyph(ns.places) }}</span>
+          <span class="nm">장소 · 콘텐츠</span>
+          {% if places %}<span class="ct">{{ places.total | default(0) }}</span>{% endif %}
+          <span class="visually-hidden">상태 {{ verdict_word(ns.places) }}</span>
+        </a>
+        <a href="#database" data-spy="database">
+          <span class="rdot s{{ ns.database }}" aria-hidden="true">{{ sev_glyph(ns.database) }}</span>
+          <span class="nm">데이터베이스</span>
+          {% if db_tables %}<span class="ct">{{ db_tables | length }}</span>{% endif %}
+          <span class="visually-hidden">상태 {{ verdict_word(ns.database) }}</span>
+        </a>
+        <a href="#monitoring" data-spy="monitoring">
+          <span class="rdot {{ 's0' if mon_count else 'sn' }}" aria-hidden="true">{{ '●' if mon_count else '○' }}</span>
+          <span class="nm">외부 모니터링</span><span class="ct">{{ mon_count }}</span>
+        </a>
+      </nav>
+      <div class="rail-foot">
+        <span class="env"><span aria-hidden="true">◱</span> 읽기전용 · cut 1</span>
+        <span>operator: <strong>{{ operator }}</strong></span>
+        <span><a href="/docs">/docs</a> · <a href="/api/ops/health">API</a></span>
+      </div>
+    </div>
+  </aside>
 
-  <!-- KMA 폴링 현황 -->
-  <section>
-    <h2>KMA 폴링 현황</h2>
-    {% if errors.polling %}
-      <p class="err">조회 실패: {{ errors.polling }}</p>
-    {% elif polling %}
-      <table>
-        <tbody>
-          <tr><th>활성 격자 / 전체</th>
-              <td>{{ polling.grids.active_grids | default(0) }} / {{ polling.grids.total_grids | default(0) }}</td></tr>
-          <tr><th>단기예보 최신 발표(base_at)</th>
-              <td>{{ polling.short_term.last_base_at or "—" }} <span class="muted">({{ polling.short_term.rows | default(0) }} rows)</span></td></tr>
-          <tr><th>중기 육상 최신 발표(tm_fc)</th>
-              <td>{{ polling.mid_land.last_tm_fc or "—" }} <span class="muted">({{ polling.mid_land.rows | default(0) }} rows)</span></td></tr>
-          <tr><th>중기 기온 최신 발표(tm_fc)</th>
-              <td>{{ polling.mid_temp.last_tm_fc or "—" }} <span class="muted">({{ polling.mid_temp.rows | default(0) }} rows)</span></td></tr>
-        </tbody>
-      </table>
-      <p class="note">예보 행이 0이면 KMA_SERVICE_KEY 미설정이거나 폴링 미실행 상태일 수 있습니다.</p>
-    {% else %}
-      <p class="muted">데이터 없음</p>
-    {% endif %}
-  </section>
+  {#- ── 메인 컬럼 ─────────────────────────────────────────────────── -#}
+  <main class="main">
+    <div class="main-in">
+      <div class="subhead">
+        <div class="subhead-row">
+          <div>
+            <h1>운영 모니터링</h1>
+            <div class="sub">hub_data 읽기전용 · user / agent / hub 헬스 · 외부 모니터링 연동</div>
+          </div>
+          <div class="refresh">
+            <span class="upd" id="lastUpdated" data-at="">방금 갱신</span>
+            <button type="button" class="btn" id="refreshBtn">↻ 새로고침</button>
+            <label><input type="checkbox" id="autoToggle"> 자동</label>
+            <select id="autoInterval" aria-label="자동 새로고침 간격">
+              <option value="30">30초</option>
+              <option value="60">60초</option>
+              <option value="300">5분</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="progress" aria-hidden="true"><i id="progressBar"></i></div>
 
-  <!-- 예보 테이블 행수/만료 -->
-  <section>
-    <h2>예보 테이블 현황</h2>
-    {% if errors.forecast %}
-      <p class="err">조회 실패: {{ errors.forecast }}</p>
-    {% elif forecast %}
-      <table>
-        <thead><tr><th>테이블</th><th>행수</th><th>min(expires_at)</th><th>max(expires_at)</th></tr></thead>
-        <tbody>
-        {% for t in forecast %}
-          <tr><td><code>{{ t.table }}</code></td><td>{{ t.rows | default(0) }}</td>
-              <td>{{ t.min_expires_at or "—" }}</td><td>{{ t.max_expires_at or "—" }}</td></tr>
-        {% endfor %}
-        </tbody>
-      </table>
-    {% else %}
-      <p class="muted">데이터 없음</p>
-    {% endif %}
-  </section>
+      {#- 히어로 상태 밴드: 전체 = 최악 심각도 -#}
+      <section class="hero s{{ overall }}" aria-label="전체 상태">
+        <span class="bar" aria-hidden="true"></span>
+        <span class="gm" aria-hidden="true">{% if overall>=3 %}✕{% elif overall==2 %}◆{% elif overall==1 %}▲{% else %}●{% endif %}</span>
+        <div>
+          <div class="verdict">{{ verdict_word(overall) }}</div>
+          <div class="desc">
+            {% if overall == 0 %}모든 도메인 정상 — 조치 필요 없음
+            {% elif problem_count > 0 %}{{ problem_count }}개 도메인에서 조치가 필요할 수 있습니다
+            {% else %}일부 도메인에 주의 신호가 있습니다{% endif %}
+          </div>
+        </div>
+        <span class="spacer"></span>
+        {{ pill(overall) }}
+      </section>
 
-  <!-- 장소 후보 -->
-  <section>
-    <h2>장소 후보(places)</h2>
-    {% if errors.places %}
-      <p class="err">조회 실패: {{ errors.places }}</p>
-    {% elif places %}
-      <table>
-        <thead><tr><th>출처(source)</th><th>행수</th></tr></thead>
-        <tbody>
-        {% for s in places.by_source %}
-          <tr><td>{{ s.source }}</td><td>{{ s.rows }}</td></tr>
-        {% else %}
-          <tr><td colspan="2" class="muted">행 없음</td></tr>
-        {% endfor %}
-          <tr><th>합계</th><th>{{ places.total | default(0) }}</th></tr>
-        </tbody>
-      </table>
-      <p class="note">kakao 결과는 Redis L1 캐시로만 다뤄져 places 에는 durunubi 위주로 적재됩니다.</p>
-    {% else %}
-      <p class="muted">데이터 없음</p>
-    {% endif %}
-  </section>
+      {#- KPI 스탯 스트립 -#}
+      <div class="kpi">
+        <a class="tile" href="#platform">
+          <span class="lb">코어 서비스</span>
+          <span class="vl">{{ svc_up }} / {{ svc_total }}</span>
+          <span class="xt">정상 응답 서비스</span>
+        </a>
+        <a class="tile" href="#weather">
+          <span class="lb">활성 격자</span>
+          {% if errors.polling %}<span class="vl">—</span><span class="xt">조회 실패</span>
+          {% elif polling and polling.grids %}<span class="vl">{{ polling.grids.active_grids | default(0) }} / {{ polling.grids.total_grids | default(0) }}</span><span class="xt">폴링 대상 / 전체</span>
+          {% else %}<span class="vl">—</span><span class="xt">데이터 없음</span>{% endif %}
+        </a>
+        <a class="tile" href="#platform">
+          <span class="lb">Gemini 연결</span>
+          {% if gemini and gemini.configured and gemini.ok %}<span class="vl">정상</span><span class="xt">모델 {{ gemini.model_count }}종</span>
+          {% elif gemini and not gemini.configured %}<span class="vl">미설정</span><span class="xt">GEMINI_API_KEY</span>
+          {% else %}<span class="vl">이상</span><span class="xt">{{ gemini.detail if gemini else '—' }}</span>{% endif %}
+        </a>
+        <a class="tile" href="#places">
+          <span class="lb">장소 후보</span>
+          {% if errors.places %}<span class="vl">—</span><span class="xt">조회 실패</span>
+          {% elif places %}<span class="vl">{{ places.total | default(0) }}</span><span class="xt">hub_data.places</span>
+          {% else %}<span class="vl">—</span><span class="xt">데이터 없음</span>{% endif %}
+        </a>
+        <a class="tile" href="#monitoring">
+          <span class="lb">외부 모니터링</span>
+          <span class="vl">{{ mon_count }}</span>
+          <span class="xt">{{ '연동된 패널' if mon_count else '연동 대기' }}</span>
+        </a>
+      </div>
 
-</body>
-</html>
+      {#- ── 도메인 1 · 플랫폼 서비스 ─────────────────────────────────── -#}
+      <section class="card" id="platform">
+        <div class="card-head">
+          <div class="lead">
+            <span class="card-glyph" aria-hidden="true">◎</span>
+            <div><h2>플랫폼 서비스</h2><div class="card-sub">user · agent · hub 헬스 · Gemini 연결</div></div>
+          </div>
+          {{ pill(ns.platform) }}
+        </div>
+        <div class="card-body">
+          <div class="tbl-scroll">
+            <table class="tbl">
+              <thead><tr><th>서비스</th><th>상태</th><th class="num">HTTP</th><th class="num">지연</th><th>엔드포인트</th></tr></thead>
+              <tbody>
+              {% for s in health %}
+                <tr>
+                  <td>{{ s.service }}</td>
+                  <td>
+                    {% if s.ok %}<span class="pill s0"><span class="g">●</span>정상</span>
+                    {% elif s.http_status %}<span class="pill s2"><span class="g">◆</span>이상</span>
+                    {% else %}<span class="pill s3"><span class="g">✕</span>장애</span>{% endif %}
+                  </td>
+                  <td class="num">{{ s.http_status if s.http_status is not none else "—" }}</td>
+                  <td class="num">{{ (s.latency_ms ~ " ms") if s.latency_ms is not none else "—" }}</td>
+                  <td><code>{{ s.url }}</code>{% if s.error %} <span class="muted">({{ s.error }})</span>{% endif %}</td>
+                </tr>
+              {% else %}
+                <tr><td colspan="5" class="muted">헬스 대상 없음</td></tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <hr class="rule">
+          <div class="card-body" style="display:flex; align-items:center; gap:12px; flex-wrap:wrap">
+            <strong style="font-size:.92rem">Gemini</strong>
+            {% if not gemini or not gemini.configured %}
+              <span class="pill s1"><span class="g">▲</span>미설정</span>
+              <span class="muted">{{ gemini.detail if gemini and gemini.detail else 'GEMINI_API_KEY 미설정 (agent .env 공유)' }}</span>
+            {% elif gemini.ok %}
+              <span class="pill s0"><span class="g">●</span>정상</span>
+              <span class="muted">HTTP {{ gemini.http_status }} · {{ gemini.latency_ms }} ms · 모델 {{ gemini.model_count }}종</span>
+            {% else %}
+              <span class="pill s2"><span class="g">◆</span>이상</span>
+              <span class="muted">{{ gemini.detail }}</span>
+            {% endif %}
+          </div>
+          <p class="note">Gemini 는 agent 소유 모델이며, admin 은 무료 메타 호출(models.list)로 연결·키 유효성만 점검합니다(생성 quota 무소모).</p>
+        </div>
+      </section>
+
+      {#- ── 도메인 2 · 기상 파이프라인 ──────────────────────────────── -#}
+      <section class="card" id="weather">
+        <div class="card-head">
+          <div class="lead">
+            <span class="card-glyph" aria-hidden="true">☁</span>
+            <div><h2>기상 파이프라인</h2><div class="card-sub">KMA 폴링 · 단기/중기 예보 적재</div></div>
+          </div>
+          {{ pill(ns.weather) }}
+        </div>
+        <div class="card-body">
+          {% if errors.polling %}
+            <div class="notice err"><span class="g" aria-hidden="true">✕</span><span>조회 실패: {{ errors.polling }}</span></div>
+          {% elif polling %}
+            <div class="tbl-scroll">
+              <table class="tbl">
+                <tbody>
+                  <tr><th class="kv">활성 격자 / 전체</th><td class="num">{{ polling.grids.active_grids | default(0) }} / {{ polling.grids.total_grids | default(0) }}</td></tr>
+                  <tr><th class="kv">단기예보 최신 발표(base_at)</th><td>{{ polling.short_term.last_base_at or "—" }} <span class="muted tnum">({{ polling.short_term.rows | default(0) }} rows)</span></td></tr>
+                  <tr><th class="kv">중기 육상 최신 발표(tm_fc)</th><td>{{ polling.mid_land.last_tm_fc or "—" }} <span class="muted tnum">({{ polling.mid_land.rows | default(0) }} rows)</span></td></tr>
+                  <tr><th class="kv">중기 기온 최신 발표(tm_fc)</th><td>{{ polling.mid_temp.last_tm_fc or "—" }} <span class="muted tnum">({{ polling.mid_temp.rows | default(0) }} rows)</span></td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="note">예보 행이 0이면 KMA_SERVICE_KEY 미설정이거나 폴링 미실행 상태일 수 있습니다.</p>
+          {% else %}
+            <div class="notice empty"><span class="g" aria-hidden="true">○</span><span>데이터 없음</span></div>
+          {% endif %}
+
+          <hr class="rule">
+          <div class="card-body">
+            <div class="card-sub" style="margin-bottom:8px">예보 테이블 현황</div>
+            {% if errors.forecast %}
+              <div class="notice err"><span class="g" aria-hidden="true">✕</span><span>조회 실패: {{ errors.forecast }}</span></div>
+            {% elif forecast %}
+              <div class="tbl-scroll">
+                <table class="tbl">
+                  <thead><tr><th>테이블</th><th class="num">행수</th><th>min(expires_at)</th><th>max(expires_at)</th></tr></thead>
+                  <tbody>
+                  {% for t in forecast %}
+                    <tr><td><code>{{ t.table }}</code></td><td class="num">{{ t.rows | default(0) }}</td>
+                        <td class="tnum">{{ t.min_expires_at or "—" }}</td><td class="tnum">{{ t.max_expires_at or "—" }}</td></tr>
+                  {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% else %}
+              <div class="notice empty"><span class="g" aria-hidden="true">○</span><span>데이터 없음</span></div>
+            {% endif %}
+          </div>
+        </div>
+      </section>
+
+      {#- ── 도메인 3 · 장소 · 콘텐츠 ────────────────────────────────── -#}
+      <section class="card" id="places">
+        <div class="card-head">
+          <div class="lead">
+            <span class="card-glyph" aria-hidden="true">◈</span>
+            <div><h2>장소 · 콘텐츠</h2><div class="card-sub">hub_data.places 출처별 집계</div></div>
+          </div>
+          {{ pill(ns.places) }}
+        </div>
+        <div class="card-body">
+          {% if errors.places %}
+            <div class="notice err"><span class="g" aria-hidden="true">✕</span><span>조회 실패: {{ errors.places }}</span></div>
+          {% elif places %}
+            {% set ptotal = places.total | default(0) %}
+            {% if ptotal > 0 and places.by_source %}
+              <div class="ratio" aria-hidden="true">
+                {% for s in places.by_source %}
+                  <span style="width:{{ (100 * (s.rows | default(0)) / ptotal) | round(2) }}%; background:{{ 'var(--cat-1)' if loop.index0 % 2 == 0 else 'var(--cat-2)' }}"></span>
+                {% endfor %}
+              </div>
+              <div class="legend">
+                {% for s in places.by_source %}
+                  <span class="k"><span class="sw" style="background:{{ 'var(--cat-1)' if loop.index0 % 2 == 0 else 'var(--cat-2)' }}"></span>{{ s.source }} <span class="muted tnum">{{ s.rows }}</span></span>
+                {% endfor %}
+              </div>
+            {% endif %}
+            <div class="tbl-scroll" style="margin-top:12px">
+              <table class="tbl">
+                <thead><tr><th>출처(source)</th><th class="num">행수</th></tr></thead>
+                <tbody>
+                {% for s in places.by_source %}
+                  <tr><td>{{ s.source }}</td><td class="num">{{ s.rows }}</td></tr>
+                {% else %}
+                  <tr><td colspan="2" class="muted">행 없음</td></tr>
+                {% endfor %}
+                  <tr><th class="kv">합계</th><td class="num"><strong>{{ places.total | default(0) }}</strong></td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="note">kakao 결과는 Redis L1 캐시로만 다뤄져 places 에는 durunubi 위주로 적재됩니다.</p>
+          {% else %}
+            <div class="notice empty"><span class="g" aria-hidden="true">○</span><span>데이터 없음</span></div>
+          {% endif %}
+        </div>
+      </section>
+
+      {#- ── 도메인 4 · 데이터베이스 (DB 뷰어) ──────────────────────── -#}
+      <section class="card" id="database">
+        <div class="card-head">
+          <div class="lead">
+            <span class="card-glyph" aria-hidden="true">▤</span>
+            <div><h2>DB 뷰어</h2><div class="card-sub">schema: hub_data · 읽기전용 (user_service/langgraph 제외)</div></div>
+          </div>
+          {{ pill(ns.database) }}
+        </div>
+        <div class="card-body">
+          {% if errors.db_tables %}
+            <div class="notice err"><span class="g" aria-hidden="true">✕</span><span>조회 실패: {{ errors.db_tables }}</span></div>
+          {% elif db_tables %}
+            <div class="tbl-scroll">
+              <table class="tbl">
+                <thead><tr><th>테이블</th><th class="num">행수</th><th>보기</th></tr></thead>
+                <tbody>
+                {% for t in db_tables %}
+                  <tr><td><code>{{ t.table }}</code></td><td class="num">{{ t.rows }}</td>
+                      <td><a href="/db/{{ t.table }}">행 보기 →</a></td></tr>
+                {% else %}
+                  <tr><td colspan="3" class="muted">테이블 없음</td></tr>
+                {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% else %}
+            <div class="notice empty"><span class="g" aria-hidden="true">○</span><span>테이블 없음</span></div>
+          {% endif %}
+        </div>
+      </section>
+
+      {#- ── 도메인 5 · 외부 모니터링 (Grafana 등 연동 슬롯) ───────────── -#}
+      <section class="card" id="monitoring">
+        <div class="card-head">
+          <div class="lead">
+            <span class="card-glyph" aria-hidden="true">◫</span>
+            <div><h2>외부 모니터링</h2><div class="card-sub">Grafana · Prometheus 등 연동 (env MONITORING_PANELS)</div></div>
+          </div>
+          {% if mon_count %}<span class="pill neutral">{{ mon_count }}개 패널</span>{% else %}<span class="pill s1"><span class="g">▲</span>연동 대기</span>{% endif %}
+        </div>
+        <div class="card-body">
+          {% if not monitoring %}
+            {#- 빈 상태: 친절 안내 + env 설정 예시 -#}
+            <div class="notice empty" style="flex-direction:column; align-items:flex-start; gap:.5rem">
+              <div><span class="g" aria-hidden="true">◫</span> <strong>아직 연동된 모니터링이 없습니다.</strong></div>
+              <div>Grafana·Prometheus 등 이미 운영 중인 모니터링 URL 을 <code>env MONITORING_PANELS</code> 에 JSON 배열로 지정하면 이 자리에 iframe 임베드/링크 카드로 나타납니다. admin 은 해당 도구를 직접 기동하지 않습니다(cut 1 무변경).</div>
+            </div>
+{% raw %}<pre class="example"><code>MONITORING_PANELS=[{"title":"Grafana · MAP 개요","url":"http://127.0.0.1:3000/d/UID/map?kiosk&refresh=30s","embed":true,"height":460,"description":"서비스 지표 개요"},
+                   {"title":"Prometheus","url":"http://127.0.0.1:9090","embed":false,"description":"메트릭 쿼리 콘솔"}]</code></pre>{% endraw %}
+          {% else %}
+            {#- (A) 임베드 패널: 전폭 iframe + 항상 보이는 새 탭 링크 + 프레임차단 폴백 안내 -#}
+            {% for p in monitoring if p.embed %}
+              <figure class="embed">
+                <figcaption class="embed-head">
+                  <span class="et">{{ p.title }}</span>
+                  <span class="host"><code>{{ p.url.split('/')[2] if '//' in p.url else p.url }}</code></span>
+                  {% if p.description %}<span class="muted" style="font-size:.78rem">{{ p.description }}</span>{% endif %}
+                  <span class="sp"></span>
+                  <a class="btn" href="{{ p.url }}" target="_blank" rel="noopener noreferrer">새 탭에서 열기 ↗</a>
+                </figcaption>
+                <iframe src="{{ p.url }}" title="{{ p.title }}" height="{{ p.height }}"
+                        loading="lazy" referrerpolicy="no-referrer"
+                        sandbox="allow-scripts allow-same-origin allow-popups allow-forms"></iframe>
+                <p class="embed-note">임베드가 비어 보이면 대상이 프레임 삽입(X-Frame-Options / CSP frame-ancestors)을 차단했을 수 있습니다 — 위 ‘새 탭에서 열기’로 확인하세요. (Grafana 는 <code>allow_embedding=true</code> 필요)</p>
+              </figure>
+            {% endfor %}
+
+            {#- (B) 링크아웃 패널: 카드 그리드 -#}
+            {% set linkouts = monitoring | rejectattr('embed') | list %}
+            {% if linkouts %}
+              <div class="grid-cards" style="margin-top:4px">
+                {% for p in linkouts %}
+                  <div class="lcard">
+                    <div class="lt">{{ p.title }} <span class="pill neutral">링크</span></div>
+                    {% if p.description %}<div class="ld">{{ p.description }}</div>{% endif %}
+                    <div class="lu"><code>{{ p.url }}</code></div>
+                    <div class="lact"><a class="btn accent" href="{{ p.url }}" target="_blank" rel="noopener noreferrer">새 탭에서 열기 ↗</a></div>
+                  </div>
+                {% endfor %}
+              </div>
+            {% endif %}
+          {% endif %}
+        </div>
+      </section>
+
+    </div>
+  </main>
+</div>
+{% endblock %}
+
+{% block script %}
+<script>
+(function () {
+  "use strict";
+  var LS = "admin.autorefresh";
+  var toggle = document.getElementById("autoToggle");
+  var sel = document.getElementById("autoInterval");
+  var btn = document.getElementById("refreshBtn");
+  var bar = document.getElementById("progressBar");
+  var upd = document.getElementById("lastUpdated");
+  var loadedAt = Date.now();
+
+  // ── 마지막 갱신 상대시각(라이트 폴백: 절대시각) ──────────────────
+  function pad(n){ return (n < 10 ? "0" : "") + n; }
+  var d = new Date(loadedAt);
+  var abs = pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+  function renderUpdated(){
+    var s = Math.round((Date.now() - loadedAt) / 1000);
+    var rel = s < 5 ? "방금" : (s < 60 ? s + "초 전" : Math.floor(s/60) + "분 전");
+    upd.textContent = "갱신 " + abs + " · " + rel;
+    upd.title = d.toISOString();
+  }
+  renderUpdated();
+  setInterval(renderUpdated, 1000);
+
+  // ── 수동 새로고침 ────────────────────────────────────────────────
+  btn.addEventListener("click", function(){
+    btn.disabled = true; btn.textContent = "갱신 중…";
+    location.reload();
+  });
+
+  // ── 자동 새로고침 (localStorage 지속 · 백그라운드 탭 일시정지) ────
+  var timer = null, deadline = 0;
+  function saveState(){
+    try { localStorage.setItem(LS, JSON.stringify({ on: toggle.checked, iv: sel.value })); } catch(e){}
+  }
+  function loadState(){
+    try {
+      var raw = localStorage.getItem(LS);
+      if (!raw) return;
+      var st = JSON.parse(raw);
+      toggle.checked = !!st.on;
+      if (st.iv) sel.value = String(st.iv);
+    } catch(e){}
+  }
+  function tick(){
+    if (!toggle.checked){ bar.style.width = "0"; return; }
+    if (document.hidden){ return; }               // 백그라운드 탭이면 리로드 미발화
+    var iv = parseInt(sel.value, 10) * 1000;
+    var remain = deadline - Date.now();
+    if (remain <= 0){ location.reload(); return; }
+    bar.style.width = (100 * (1 - remain / iv)).toFixed(1) + "%";
+  }
+  function arm(){
+    if (timer){ clearInterval(timer); timer = null; }
+    bar.style.width = "0";
+    if (!toggle.checked) return;
+    deadline = Date.now() + parseInt(sel.value, 10) * 1000;
+    timer = setInterval(tick, 1000);
+  }
+  toggle.addEventListener("change", function(){ saveState(); arm(); });
+  sel.addEventListener("change", function(){ saveState(); arm(); });
+  document.addEventListener("visibilitychange", function(){
+    // 다시 보이는 순간 마감시각을 갱신해 즉시 리로드되지 않도록 함
+    if (!document.hidden && toggle.checked){ deadline = Date.now() + parseInt(sel.value,10)*1000; }
+  });
+  loadState(); arm();
+
+  // ── 스크롤스파이: 현재 도메인을 레일에서 강조 ────────────────────
+  var spies = [].slice.call(document.querySelectorAll("[data-spy]"));
+  var byId = {};
+  spies.forEach(function(a){ byId[a.getAttribute("data-spy")] = a; });
+  if ("IntersectionObserver" in window){
+    var io = new IntersectionObserver(function(entries){
+      entries.forEach(function(en){
+        if (en.isIntersecting){
+          spies.forEach(function(a){ a.classList.remove("active"); });
+          var link = byId[en.target.id];
+          if (link) link.classList.add("active");
+        }
+      });
+    }, { rootMargin: "-45% 0px -50% 0px" });
+    ["platform","weather","places","database","monitoring"].forEach(function(id){
+      var el = document.getElementById(id); if (el) io.observe(el);
+    });
+  }
+})();
+</script>
+{% endblock %}

@@ -120,6 +120,16 @@ async def api_gemini(_: str = Depends(require_operator)) -> dict:
     return await gemini_client.check_gemini()
 
 
+@app.get("/api/ops/monitoring")
+async def api_monitoring(_: str = Depends(require_operator)) -> dict:
+    """외부 모니터링 연동 슬롯 목록(Grafana 등, config 기반).
+
+    admin 은 대상 도구를 기동하지 않고, env(MONITORING_PANELS)로 지정된
+    URL 을 대시보드에서 iframe/링크로 연결만 한다. 미설정이면 빈 배열.
+    """
+    return {"panels": [p.model_dump() for p in settings.MONITORING_PANELS]}
+
+
 # --- DB 뷰어 (hub_data 한정, Basic 보호) ---
 
 
@@ -185,6 +195,8 @@ async def dashboard(
     # 헬스 롤업·Gemini 점검은 자체적으로 실패를 흡수하므로 그대로 사용
     context["health"] = await health_client.rollup()
     context["gemini"] = await gemini_client.check_gemini()
+    # 외부 모니터링 연동 슬롯(Grafana 등)은 config 기반 — DB/네트워크 무관.
+    context["monitoring"] = settings.MONITORING_PANELS
     return _TEMPLATES.TemplateResponse(request, "dashboard.html", context)
 
 
