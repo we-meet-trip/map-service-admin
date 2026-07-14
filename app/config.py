@@ -1,16 +1,11 @@
-"""map-service-admin 환경설정.
+"""map-service-admin 환경설정 (cut 2 — 운영 콘솔 JSON API).
 
-운영 모니터링 백엔드(cut 1)의 설정 컨테이너. 다른 서비스(user/agent/hub)와
-동일한 프로젝트 루트 `.env` 를 공유하므로 `extra="ignore"` 로 무관한 키를
-무시한다(hub/config.py 와 동일 규약).
+다른 서비스(user/agent/hub)와 동일한 프로젝트 루트 `.env` 를 공유하므로
+`extra="ignore"` 로 무관한 키를 무시한다(hub/config.py 와 동일 규약).
 
-cut 1 범위: hub_data 읽기전용 조회 + user/agent/hub 헬스 롤업.
-쓰기·admin_data·감사·회원조회는 cut 2로 연기.
-
-호출처:
-  - app.db        — ADMIN_DATABASE_URL (map_admin 읽기전용 DSN)
-  - app.security  — ADMIN_BASIC_USER / ADMIN_BASIC_PASSWORD (단일 공유 Basic)
-  - app.health_client — USER/AGENT/HUB_BASE_URL, HEALTH_TIMEOUT_SEC
+cut 2 범위: hub_data 읽기전용 + admin_data 소유 RW(감사/계정/세션) + Redis 진단
+RO(DB2 스트림·DB3 Gemini 쿼터·DB4 캐시) + hub/BFF `/internal` 위임 + 외부 API
+상태/프로브. 인증은 admin_accounts(bcrypt) + 서버측 세션(HttpOnly 쿠키).
 """
 from __future__ import annotations
 
@@ -21,17 +16,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class MonitoringPanel(BaseModel):
     """외부 모니터링 연동 패널 1개(Grafana·Prometheus 등 범용).
 
-    admin 은 Grafana/Prometheus 를 **직접 기동하지 않는다**(cut 1 무변경).
-    운영자가 이미 띄워 둔 모니터링 URL 을 env 로 '연결'하기 위한 슬롯이다.
-
-    필드:
-      title       : 패널 표시명(예: "Grafana · MAP 개요").
-      url         : 대상 URL. http/https 만 허용(iframe/링크 안전).
-      embed       : True 면 대시보드에 <iframe> 인라인 임베드, False 면
-                    새 탭 링크 카드로만 노출. (임베드는 대상이 프레임 삽입을
-                    허용해야 보인다 — Grafana allow_embedding 등.)
-      height      : embed=True 일 때 iframe 높이(px).
-      description : 카드 하단 보조 설명(선택).
+    admin 은 대상 도구를 iframe/링크로 '연결'만 한다(직접 기동은 compose
+    monitoring 프로파일이 담당). SPA 의 모니터링 화면이 본 슬롯을 렌더한다.
     """
 
     title: str
@@ -43,10 +29,7 @@ class MonitoringPanel(BaseModel):
     @field_validator("url")
     @classmethod
     def _http_only(cls, v: str) -> str:
-        """http/https 스킴만 허용(javascript: 등 iframe src 주입 차단).
-
-        스킴은 RFC 3986 상 대소문자 무시이므로 소문자로 접어 비교한다
-        (`HTTPS://` 도 유효 — 원본 v 는 그대로 반환)."""
+        """http/https 스킴만 허용(javascript: 등 iframe src 주입 차단)."""
         if not v.lower().startswith(("http://", "https://")):
             raise ValueError("MONITORING_PANELS url must be http(s)")
         return v
@@ -59,61 +42,79 @@ class MonitoringPanel(BaseModel):
 
 
 class Settings(BaseSettings):
-    """환경변수/`.env` 기반 설정.
-
-    [필수]
-    ADMIN_DATABASE_URL: SQLAlchemy 비동기 DSN. map_admin(읽기전용) 역할로
-        hub_data 를 SELECT 한다. 예:
-        postgresql+psycopg://map_admin:<pw>@postgres:5432/map
-        (<pw> 는 infra .env 의 MAP_ADMIN_PASSWORD 와 반드시 일치)
-
-    [운영자 인증 — 단일 공유 HTTP Basic]
-    ADMIN_BASIC_USER / ADMIN_BASIC_PASSWORD: 대시보드·/docs·API 공통 Basic
-        자격. 계정 테이블/bcrypt 없이 .env 한 쌍으로 단순 운영(현 단계 간단히).
-
-    [헬스 롤업 대상 — 컨테이너 내부 포트]
-    USER_BASE_URL: Spring user-BFF (헬스는 /actuator/health).
-    AGENT_BASE_URL / HUB_BASE_URL: FastAPI (헬스는 /health).
-        map-net 안에서는 컨테이너명+컨테이너포트(user:8080, agent:8000,
-        hub:8000)로 도달한다(호스트 매핑 8001 아님).
-    """
+    """환경변수/`.env` 기반 설정."""
 
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
+    # [DB] map_admin DSN. hub_data SELECT + admin_data 소유 RW.
     ADMIN_DATABASE_URL: str
+    # 쿼리 statement timeout(초). 엔진 connect_args 에 반영(느린 조회 상한).
+    DB_TIMEOUT_SEC: float = 5.0
 
-    ADMIN_BASIC_USER: str = "admin"
-    ADMIN_BASIC_PASSWORD: SecretStr = SecretStr("")
+    # [인증 — 계정 세션] admin_accounts(bcrypt) + admin_sessions(HttpOnly 쿠키).
+    # 최초 계정 시드: accounts 가 비었을 때만 아래 부트스트랩 자격으로 1회 생성.
+    ADMIN_BOOTSTRAP_USER: str = ""
+    ADMIN_BOOTSTRAP_PASSWORD: SecretStr = SecretStr("")
+    ADMIN_SESSION_COOKIE_NAME: str = "admin_session"
+    ADMIN_SESSION_TTL_MIN: int = 720  # 12h
+    # 터널(HTTPS) 배포 시 True. loopback dev 는 False(쿠키 전송 허용).
+    ADMIN_SESSION_COOKIE_SECURE: bool = False
 
+    # [CORS] dev SPA origin 목록(JSON 배열 또는 콤마구분). 프로덕션은 nginx
+    # same-origin 프록시라 비워 둔다. 세션 쿠키를 위해 allow_credentials=True.
+    ADMIN_CORS_ORIGINS: list[str] = []
+
+    # [헬스 롤업 대상 — 컨테이너 내부 포트]
     USER_BASE_URL: str = "http://user:8080"
     AGENT_BASE_URL: str = "http://agent:8000"
     HUB_BASE_URL: str = "http://hub:8000"
-
     HEALTH_TIMEOUT_SEC: float = 3.0
-    DB_TIMEOUT_SEC: float = 5.0
 
-    # [Gemini 연결 점검] agent 소유 모델이지만, admin 은 연결+키 유효성만
-    # 무료 메타 호출(models.list)로 점검한다. 생성(generateContent) 미사용.
+    # [OSRM 프로브] hub 와 동일 키 재사용. 비면 프로브 skip.
+    OSRM_FOOT_BASE_URL: str = ""
+    OSRM_BICYCLE_BASE_URL: str = ""
+
+    # [Redis 진단 RO] 스트림/쿼터/캐시 조회. hub/BFF 와 동일 인스턴스.
+    ADMIN_REDIS_URL: str = "redis://redis:6379"
+    REDIS_DB_STREAMS: int = 2
+    REDIS_DB_RATELIMIT: int = 3
+    REDIS_DB_CACHE: int = 4
+    # 스트림/DLQ/컨슈머 이름(agent·BFF 규약과 일치).
+    STREAM_DONE: str = "agent:jobs:done"
+    STREAM_STATUS: str = "agent:jobs:status"
+    STREAM_DLQ: str = "agent:jobs:done:dlq"
+    STREAM_GROUP: str = "bff-result"
+    REDIS_TIMEOUT_SEC: float = 2.0
+
+    # [내부 위임] hub/BFF `/internal` 아웃바운드 토큰(공유 비밀 재사용).
+    INTERNAL_SERVICE_TOKEN: SecretStr = SecretStr("")
+    INTERNAL_TIMEOUT_SEC: float = 5.0
+
+    # [Gemini 연결 점검] 무료 메타 호출(models.list). 생성 미사용.
     GEMINI_API_KEY: SecretStr = SecretStr("")
     GEMINI_MODELS_URL: str = (
         "https://generativelanguage.googleapis.com/v1beta/models"
     )
     GEMINI_TIMEOUT_SEC: float = 5.0
+    GEMINI_RPD_CAP: int = 200  # agent 의 일일 쿼터 상한(표시용)
 
-    # [DB 뷰어(hub_data 한정)] 페이지네이션 기본/상한
+    # [외부 API 키 존재 여부/프로브] hub 소유 키를 공유 .env 에서 읽어 상태
+    # 표시·수동 프로브에 사용한다. 값은 마스킹해서만 노출한다.
+    KAKAO_REST_API_KEY: SecretStr = SecretStr("")
+    KMA_SERVICE_KEY: SecretStr = SecretStr("")
+    TOUR_API_SERVICE_KEY: SecretStr = SecretStr("")
+    NAVER_CLIENT_ID: SecretStr = SecretStr("")
+    NAVER_CLIENT_SECRET: SecretStr = SecretStr("")
+    EXTERNAL_PROBE_TIMEOUT_SEC: float = 6.0
+
+    # [DB 뷰어(hub_data 한정)]
     DB_PAGE_SIZE_DEFAULT: int = 50
     DB_PAGE_SIZE_MAX: int = 500
+    DB_EXPORT_MAX_ROWS: int = 50000
 
-    # [외부 모니터링 연동 슬롯] Grafana·Prometheus 등 이미 운영 중인 모니터링
-    # URL 을 대시보드에 '연결'하기 위한 config-only 슬롯. admin 은 해당 도구를
-    # 직접 기동하지 않는다(cut 1 무변경). env 에 JSON 배열로 지정한다. 예:
-    #   MONITORING_PANELS=[{"title":"Grafana · MAP 개요",
-    #     "url":"http://grafana:3000/d/uid/map?kiosk","embed":true,"height":460,
-    #     "description":"서비스 지표 개요"}]
-    # 미설정(빈 배열)이면 화면은 "연동된 모니터링 없음" 안내를 표시한다.
-    # pydantic-settings 는 복합 타입 env 값을 JSON 으로 자동 파싱한다.
+    # [외부 모니터링 연동 슬롯] Grafana 등 iframe/링크. JSON 배열.
     MONITORING_PANELS: list[MonitoringPanel] = []
 
 

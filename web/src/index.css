@@ -1,0 +1,165 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ------------------------------------------------------------------ *
+ * Design tokens — a neutral, professional palette.
+ * Light is the default; the [data-theme="dark"] block overrides it.
+ * A @media(prefers-color-scheme:dark) block is kept as a no-JS fallback,
+ * but the inline seed script in index.html normally sets data-theme first.
+ * ------------------------------------------------------------------ */
+:root {
+  --color-bg: #f5f6f8;
+  --color-surface: #ffffff;
+  --color-surface-2: #f0f2f5;
+  --color-border: #e3e6ea;
+  --color-fg: #1a1d21;
+  --color-fg-muted: #5b626b;
+  --color-fg-subtle: #8a919b;
+
+  --color-brand: #2563eb;
+  --color-brand-fg: #ffffff;
+  --color-brand-weak: #eef3ff;
+
+  --color-good: #16a34a;
+  --color-good-weak: #e8f6ec;
+  --color-warn: #b45309;
+  --color-warn-weak: #fbf1e0;
+  --color-serious: #c2410c;
+  --color-serious-weak: #fbeadf;
+  --color-critical: #dc2626;
+  --color-critical-weak: #fce9e9;
+  --color-info: #0e7490;
+  --color-info-weak: #e5f4f8;
+
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  --color-bg: #0d1117;
+  --color-surface: #161b22;
+  --color-surface-2: #1c232d;
+  --color-border: #2a313c;
+  --color-fg: #e6e9ee;
+  --color-fg-muted: #9aa4b2;
+  --color-fg-subtle: #6b7481;
+
+  --color-brand: #4b8bf5;
+  --color-brand-fg: #0d1117;
+  --color-brand-weak: #17233b;
+
+  --color-good: #34d17f;
+  --color-good-weak: #12241a;
+  --color-warn: #e0a44a;
+  --color-warn-weak: #2a2110;
+  --color-serious: #f2884b;
+  --color-serious-weak: #2a1c12;
+  --color-critical: #f36b6b;
+  --color-critical-weak: #2a1517;
+  --color-info: #45c0dc;
+  --color-info-weak: #10262c;
+
+  color-scheme: dark;
+}
+
+/* No-JS fallback: honour the OS preference when no explicit theme is set. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --color-bg: #0d1117;
+    --color-surface: #161b22;
+    --color-surface-2: #1c232d;
+    --color-border: #2a313c;
+    --color-fg: #e6e9ee;
+    --color-fg-muted: #9aa4b2;
+    --color-fg-subtle: #6b7481;
+
+    --color-brand: #4b8bf5;
+    --color-brand-fg: #0d1117;
+    --color-brand-weak: #17233b;
+
+    --color-good: #34d17f;
+    --color-good-weak: #12241a;
+    --color-warn: #e0a44a;
+    --color-warn-weak: #2a2110;
+    --color-serious: #f2884b;
+    --color-serious-weak: #2a1c12;
+    --color-critical: #f36b6b;
+    --color-critical-weak: #2a1517;
+    --color-info: #45c0dc;
+    --color-info-weak: #10262c;
+
+    color-scheme: dark;
+  }
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-bg text-fg font-sans antialiased;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  * {
+    border-color: var(--color-border);
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-fg-subtle);
+    background-clip: padding-box;
+    border: 2px solid transparent;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-brand);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-border
+      px-3 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed
+      disabled:opacity-50 focus:outline-none;
+  }
+  .btn-primary {
+    @apply border-transparent bg-brand text-brand-fg hover:opacity-90;
+  }
+  .btn-ghost {
+    @apply bg-transparent text-fg hover:bg-surface-2;
+  }
+  .btn-danger {
+    @apply border-transparent bg-critical text-white hover:opacity-90;
+  }
+  .btn-sm {
+    @apply px-2.5 py-1.5 text-xs;
+  }
+
+  .input {
+    @apply w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-fg
+      placeholder:text-fg-subtle focus:border-brand focus:outline-none disabled:opacity-60;
+  }
+
+  .label {
+    @apply mb-1 block text-xs font-medium text-fg-muted;
+  }
+
+  .card {
+    @apply rounded-xl border border-border bg-surface shadow-card;
+  }
+}

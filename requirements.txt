@@ -1,21 +1,32 @@
-# map-service-admin 런타임 의존성 (cut 1: 읽기전용 모니터링).
+# map-service-admin 런타임 의존성 (cut 2: 운영 콘솔 JSON API).
 #
-# hub 의존성의 부분집합 + Jinja2. PostGIS/공간 연산(geoalchemy2/shapely),
-# 스케줄러(apscheduler), redis 는 cut 1 에서 불필요하므로 제외한다.
+# hub 의존성의 부분집합. UI 는 별도 SPA(admin-web)가 담당하므로 Jinja2 는
+# 제거했다. Redis 진단 RO(스트림/쿼터/캐시)를 위해 redis 를 추가한다.
+# PostGIS/공간 연산·스케줄러는 여전히 불필요하므로 제외한다.
 
 # [Web layer]
 fastapi==0.136.1
 uvicorn[standard]==0.47.0
 httpx==0.28.1
 
+# [Redis] 진단 RO — DB2 스트림/DB3 Gemini 쿼터/DB4 캐시 키수.
+redis>=5.0,<6.0
+
+# [Metrics] Prometheus 계측(/metrics). 모니터링 스택이 스크레이프.
+prometheus-fastapi-instrumentator>=7.0,<8.0
+
 # [Settings]
 pydantic-settings>=2.14.1,<3.0
 
-# [DB] — hub_data 읽기전용 조회
+# [DB] — hub_data 읽기전용 조회 + admin_data 소유 RW (cut 2)
 # sqlalchemy[asyncio]: 비동기 엔진/Core
 # psycopg[binary,pool]: PostgreSQL 드라이버(바이너리 휠, libpq 번들). hub 와 동일 드라이버.
 sqlalchemy[asyncio]>=2.0.49,<3.0
 psycopg[binary,pool]>=3.3.4,<4.0
 
-# [View] — 서버렌더 HTML 대시보드
-jinja2>=3.1.4,<4.0
+# [Migrations] — admin_data 스키마(audit_logs/admin_accounts/admin_sessions).
+# hub 와 동일한 raw-SQL Alembic 규약. 기동 시 `alembic upgrade head` 실행.
+alembic>=1.13,<2.0
+
+# [Auth] — 운영자 계정 세션 인증(bcrypt 해시). cut 2.
+bcrypt>=4.1,<5.0
