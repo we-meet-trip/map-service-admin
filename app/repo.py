@@ -149,51 +149,195 @@ async def list_hub_tables() -> list[dict[str, Any]]:
     return out
 
 
-async def browse_table(
-    table: str, limit: int, offset: int
-) -> dict[str, Any]:
-    """검증된 hub_data 테이블의 행을 페이지네이션 조회.
+# --- DB 뷰어 강화: 스키마 조회 · 정렬/필터/검색 · CSV ---------------------
+# 모든 컬럼명은 information_schema(카탈로그)에서 온 값을 화이트리스트로 검증한
+# 뒤에만 식별자로 인용한다. 값은 항상 바인드 파라미터로 전달한다(주입 차단).
 
-    `table` 은 반드시 hub_table_names() 로 사전 검증된 값이어야 한다(호출부
-    책임). 방어적으로 여기서도 카탈로그와 재대조한 뒤에만 조회한다.
+
+async def _column_meta(conn, table: str) -> list[dict[str, Any]]:
+    """table 의 컬럼 메타(이름/타입/udt/nullable)를 ordinal 순으로 반환."""
+    rows = (
+        await conn.execute(
+            text(
+                "SELECT column_name AS name, data_type, udt_name, "
+                "is_nullable FROM information_schema.columns "
+                "WHERE table_schema='hub_data' AND table_name=:t "
+                "ORDER BY ordinal_position"
+            ),
+            {"t": table},
+        )
+    ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def _select_expr(cols: list[dict[str, Any]]) -> str:
+    """SELECT 리스트. geometry 컬럼은 ST_AsText 로 텍스트화(가독)."""
+    parts: list[str] = []
+    for c in cols:
+        name = c["name"]
+        if c["udt_name"] == "geometry":
+            parts.append(f'ST_AsText("{name}") AS "{name}"')
+        else:
+            parts.append(f'"{name}"')
+    return ", ".join(parts)
+
+
+def _text_columns(cols: list[dict[str, Any]]) -> list[str]:
+    """ILIKE 검색 대상(text/varchar/char) 컬럼명."""
+    textish = {"text", "character varying", "character"}
+    return [c["name"] for c in cols if c["data_type"] in textish]
+
+
+def _build_filters(
+    colnames: set[str],
+    text_cols: list[str],
+    q: str | None,
+    filters: dict[str, str] | None,
+) -> tuple[str, dict[str, Any]]:
+    """WHERE 절과 파라미터를 만든다. 검증되지 않은 컬럼은 ValueError."""
+    conds: list[str] = []
+    params: dict[str, Any] = {}
+    if q and text_cols:
+        ors = [f'"{c}"::text ILIKE :q' for c in text_cols]
+        conds.append("(" + " OR ".join(ors) + ")")
+        params["q"] = f"%{q}%"
+    for i, (col, val) in enumerate((filters or {}).items()):
+        if col not in colnames:
+            raise ValueError(f"unknown filter column: {col}")
+        conds.append(f'"{col}"::text = :f{i}')
+        params[f"f{i}"] = val
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
+    return where, params
+
+
+def _build_order(colnames: set[str], sort: str | None) -> str:
+    """ORDER BY 절. sort='col:asc|desc'. 미지정/무효면 첫 컬럼 오름차순."""
+    if not sort:
+        return " ORDER BY 1"
+    col, _, direction = sort.partition(":")
+    if col not in colnames:
+        raise ValueError(f"unknown sort column: {col}")
+    dir_sql = "DESC" if direction.lower() == "desc" else "ASC"
+    return f' ORDER BY "{col}" {dir_sql}'
+
+
+async def table_schema(table: str) -> dict[str, Any]:
+    """table 의 컬럼 정의 + 인덱스 정의."""
+    allowed = await hub_table_names()
+    if table not in allowed:
+        raise ValueError(f"unknown hub_data table: {table}")
+    async with get_engine().connect() as conn:
+        cols = await _column_meta(conn, table)
+        idx = (
+            await conn.execute(
+                text(
+                    "SELECT indexname, indexdef FROM pg_indexes "
+                    "WHERE schemaname='hub_data' AND tablename=:t "
+                    "ORDER BY indexname"
+                ),
+                {"t": table},
+            )
+        ).mappings().all()
+    return {
+        "table": table,
+        "columns": cols,
+        "indexes": [dict(r) for r in idx],
+    }
+
+
+async def browse_table(
+    table: str,
+    limit: int,
+    offset: int,
+    sort: str | None = None,
+    q: str | None = None,
+    filters: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """검증된 hub_data 테이블을 정렬/검색/필터 + 페이지네이션 조회.
+
+    `table` 은 hub_table_names() 로 검증. 정렬/필터 컬럼은 카탈로그 컬럼과
+    대조 검증한다(무효 시 ValueError → 라우터 422).
     """
     allowed = await hub_table_names()
     if table not in allowed:
         raise ValueError(f"unknown hub_data table: {table}")
     async with get_engine().connect() as conn:
+        cols = await _column_meta(conn, table)
+        colnames = {c["name"] for c in cols}
+        where, params = _build_filters(
+            colnames, _text_columns(cols), q, filters
+        )
+        order = _build_order(colnames, sort)
+        select = _select_expr(cols)
+        params.update({"lim": limit, "off": offset})
         result = await conn.execute(
             text(
-                f'SELECT * FROM hub_data."{table}" '
-                f"ORDER BY 1 LIMIT :lim OFFSET :off"
+                f'SELECT {select} FROM hub_data."{table}"'
+                f"{where}{order} LIMIT :lim OFFSET :off"
             ),
-            {"lim": limit, "off": offset},
+            params,
         )
-        columns = list(result.keys())
+        out_cols = list(result.keys())
         rows = [
             {c: _cell(v) for c, v in dict(m).items()}
             for m in result.mappings().all()
         ]
         total = (
             await conn.execute(
-                text(f'SELECT count(*) AS c FROM hub_data."{table}"')
+                text(f'SELECT count(*) AS c FROM hub_data."{table}"{where}'),
+                {k: v for k, v in params.items() if k not in ("lim", "off")},
             )
         ).scalar_one()
     return {
         "table": table,
-        "columns": columns,
+        "columns": out_cols,
         "rows": rows,
         "total": total,
         "limit": limit,
         "offset": offset,
+        "sort": sort,
+        "q": q,
+        "filters": filters or {},
     }
 
 
-def _cell(value: Any) -> Any:
-    """JSON/HTML 표시용 셀 정규화.
+async def iter_export_rows(
+    table: str,
+    sort: str | None,
+    q: str | None,
+    filters: dict[str, str] | None,
+    max_rows: int,
+):
+    """CSV 내보내기용 행 스트림. (header, then rows). 상한 max_rows.
 
-    datetime/Decimal 등은 FastAPI 인코더가 처리하지만, geometry(WKB hex 등)
-    긴 값은 표에서 보기 좋게 앞부분만 남긴다.
+    yield: 첫 항목은 컬럼 리스트, 이후 각 행 dict. 라우터가 CSV 로 직렬화.
     """
-    if isinstance(value, str) and len(value) > 80:
-        return value[:77] + "…"
+    allowed = await hub_table_names()
+    if table not in allowed:
+        raise ValueError(f"unknown hub_data table: {table}")
+    async with get_engine().connect() as conn:
+        cols = await _column_meta(conn, table)
+        colnames = {c["name"] for c in cols}
+        where, params = _build_filters(
+            colnames, _text_columns(cols), q, filters
+        )
+        order = _build_order(colnames, sort)
+        select = _select_expr(cols)
+        params["lim"] = max_rows
+        result = await conn.stream(
+            text(
+                f'SELECT {select} FROM hub_data."{table}"'
+                f"{where}{order} LIMIT :lim"
+            ),
+            params,
+        )
+        yield [c["name"] for c in cols]
+        async for m in result.mappings():
+            yield dict(m)
+
+
+def _cell(value: Any) -> Any:
+    """JSON 표시용 셀 정규화. 지나치게 긴 문자열은 앞부분만 남긴다."""
+    if isinstance(value, str) and len(value) > 200:
+        return value[:197] + "…"
     return value

@@ -1,196 +1,192 @@
-"""admin cut 1 스모크 테스트.
+"""admin cut 2 스모크 테스트 (세션 API).
 
-DB 를 건드리지 않는 경로(인증 게이팅 + liveness)만 검증한다. hub_data 조회
-경로는 실제 DB/시드가 필요하므로 통합 검증(README §검증)에서 다룬다.
+DB/Redis/업스트림을 건드리지 않도록 각 데이터 모듈 함수를 monkeypatch 하고,
+세션 의존성(require_operator)은 dependency_overrides 로 대체한다. 실제 DB 통합
+검증은 E2E 체크리스트(Phase 7)에서 다룬다.
 
-Settings 가 ADMIN_DATABASE_URL 을 필수로 요구하므로 app 임포트 전에 환경변수를
-주입한다.
+Settings 가 ADMIN_DATABASE_URL 을 필수로 요구하므로 app 임포트 전에 주입한다.
 """
 from __future__ import annotations
 
-import base64
 import os
 
 os.environ.setdefault(
     "ADMIN_DATABASE_URL", "postgresql+psycopg://map_admin:x@localhost:5432/map"
 )
-os.environ.setdefault("ADMIN_BASIC_USER", "admin")
-os.environ.setdefault("ADMIN_BASIC_PASSWORD", "secret")
+os.environ.setdefault("INTERNAL_SERVICE_TOKEN", "test-token")
 
+import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import gemini_client, health_client, repo  # noqa: E402,F401
+from app import (  # noqa: E402
+    accounts,
+    audit,
+    bff_client,
+    external_status,
+    health_client,
+    hub_client,
+    repo,
+)
 from app.main import app  # noqa: E402
+from app.security import require_operator  # noqa: E402
+from app.upstream import UpstreamError, UpstreamUnavailable  # noqa: E402
 
 client = TestClient(app)
 
 
-def _basic(user: str, pw: str) -> dict[str, str]:
-    token = base64.b64encode(f"{user}:{pw}".encode()).decode()
-    return {"Authorization": f"Basic {token}"}
+@pytest.fixture
+def authed():
+    """require_operator 를 'tester' 로 오버라이드한 인증 컨텍스트."""
+    app.dependency_overrides[require_operator] = lambda: "tester"
+    yield
+    app.dependency_overrides.pop(require_operator, None)
 
+
+# ── liveness / 게이팅 ────────────────────────────────────────────────
 
 def test_health_no_auth() -> None:
-    """/health 는 인증 없이 200 (liveness)."""
     r = client.get("/health")
     assert r.status_code == 200
     assert r.json() == {"status": "ok", "service": "admin"}
 
 
-def test_ops_requires_basic() -> None:
-    """/api/ops/* 는 Basic 없으면 401."""
-    r = client.get("/api/ops/health")
+@pytest.mark.parametrize("path", [
+    "/api/v1/ops/health", "/api/v1/audit", "/api/v1/users",
+    "/api/v1/jobs/stats", "/api/v1/db/tables", "/docs",
+])
+def test_protected_requires_session(path) -> None:
+    """세션 쿠키 없으면 401."""
+    assert client.get(path).status_code == 401
+
+
+# ── 로그인 ───────────────────────────────────────────────────────────
+
+def test_login_success(monkeypatch) -> None:
+    async def fake_auth(u, p):
+        return 7
+
+    async def fake_session(aid):
+        from datetime import datetime, timezone
+        return "11111111-1111-1111-1111-111111111111", datetime.now(timezone.utc)
+
+    monkeypatch.setattr(accounts, "authenticate", fake_auth)
+    monkeypatch.setattr(accounts, "create_session", fake_session)
+    r = client.post("/api/v1/auth/login",
+                    json={"username": "op", "password": "pw"})
+    assert r.status_code == 200
+    assert r.json() == {"username": "op"}
+    assert "admin_session" in r.cookies
+
+
+def test_login_bad_credentials(monkeypatch) -> None:
+    async def fake_auth(u, p):
+        return None
+
+    monkeypatch.setattr(accounts, "authenticate", fake_auth)
+    r = client.post("/api/v1/auth/login",
+                    json={"username": "op", "password": "bad"})
     assert r.status_code == 401
-    assert r.headers.get("WWW-Authenticate") == "Basic"
 
 
-def test_docs_requires_basic() -> None:
-    """/docs 는 Basic 없으면 401."""
-    assert client.get("/docs").status_code == 401
+def test_me(authed) -> None:
+    assert client.get("/api/v1/auth/me").json() == {"username": "tester"}
 
 
-def test_wrong_credentials_rejected() -> None:
-    """잘못된 자격은 401."""
-    r = client.get("/api/ops/health", headers=_basic("admin", "wrong"))
-    assert r.status_code == 401
+# ── ops ──────────────────────────────────────────────────────────────
 
-
-def test_health_rollup_with_auth() -> None:
-    """올바른 Basic + 헬스 롤업(다운스트림 미가용이어도 200, ok=false 집계)."""
-    r = client.get("/api/ops/health", headers=_basic("admin", "secret"))
+def test_ops_monitoring(authed) -> None:
+    """config 기반 — DB 무관."""
+    r = client.get("/api/v1/ops/monitoring")
     assert r.status_code == 200
-    services = {s["service"] for s in r.json()["services"]}
-    assert services == {"user", "agent", "hub"}
+    assert "panels" in r.json()
 
 
-def test_dashboard_renders_with_mocked_data(monkeypatch) -> None:
-    """대시보드(/)가 hub_data 조회를 목킹한 상태에서 HTML 로 렌더된다(DB 불필요)."""
-    from app import health_client, repo
+def test_ops_health(authed, monkeypatch) -> None:
+    async def fake_rollup():
+        return [{"service": "hub", "ok": True}]
 
-    async def _polling():
-        return {
-            "grids": {"active_grids": 18, "total_grids": 18},
-            "short_term": {"last_base_at": "2026-07-01T05:00", "rows": 42},
-            "mid_land": {"last_tm_fc": None, "rows": 0},
-            "mid_temp": {"last_tm_fc": None, "rows": 0},
-        }
-
-    async def _forecast():
-        return [{"table": "short_term_forecast", "rows": 42,
-                 "min_expires_at": None, "max_expires_at": None}]
-
-    async def _places():
-        return {"total": 2, "by_source": [{"source": "durunubi", "rows": 2}]}
-
-    async def _tables():
-        return [{"table": "places", "rows": 2},
-                {"table": "subscribed_grids", "rows": 3}]
-
-    async def _rollup():
-        return [{"service": "hub", "url": "x", "ok": True,
-                 "http_status": 200, "latency_ms": 5}]
-
-    async def _gemini():
-        return {"configured": True, "ok": True, "http_status": 200,
-                "latency_ms": 42, "model_count": 47}
-
-    from app import gemini_client
-    monkeypatch.setattr(repo, "polling_status", _polling)
-    monkeypatch.setattr(repo, "forecast_rows", _forecast)
-    monkeypatch.setattr(repo, "places_stats", _places)
-    monkeypatch.setattr(repo, "list_hub_tables", _tables)
-    monkeypatch.setattr(health_client, "rollup", _rollup)
-    monkeypatch.setattr(gemini_client, "check_gemini", _gemini)
-
-    r = client.get("/", headers=_basic("admin", "secret"))
+    monkeypatch.setattr(health_client, "rollup", fake_rollup)
+    r = client.get("/api/v1/ops/health")
     assert r.status_code == 200
-    assert "text/html" in r.headers["content-type"]
-    assert "운영 모니터링" in r.text and "18 / 18" in r.text
-    assert "DB 뷰어" in r.text and "subscribed_grids" in r.text
-    assert "Gemini" in r.text and "모델 47종" in r.text
+    assert r.json()["services"][0]["service"] == "hub"
 
 
-def test_dashboard_section_error_is_isolated(monkeypatch) -> None:
-    """조회 실패 섹션이 페이지 전체를 죽이지 않고 에러 메시지로 격리 표시된다."""
-    from app import health_client, repo
+def test_external_probe_unknown(authed) -> None:
+    assert client.post("/api/v1/ops/external/nope/probe").status_code == 404
 
-    async def _boom():
-        raise RuntimeError("relation does not exist")
 
-    async def _rollup():
-        return []
+def test_external_probe_known(authed, monkeypatch) -> None:
+    async def fake_probe(p):
+        return {"provider": p, "ok": True, "latency_ms": 5, "detail": {}}
 
-    async def _gemini():
-        return {"configured": False, "ok": False, "detail": "미설정"}
+    async def fake_record(*a, **k):
+        return 42
 
-    from app import gemini_client
-    monkeypatch.setattr(repo, "polling_status", _boom)
-    monkeypatch.setattr(repo, "forecast_rows", _boom)
-    monkeypatch.setattr(repo, "places_stats", _boom)
-    monkeypatch.setattr(repo, "list_hub_tables", _boom)
-    monkeypatch.setattr(health_client, "rollup", _rollup)
-    monkeypatch.setattr(gemini_client, "check_gemini", _gemini)
-
-    r = client.get("/", headers=_basic("admin", "secret"))
+    monkeypatch.setattr(external_status, "probe", fake_probe)
+    monkeypatch.setattr(audit, "record", fake_record)
+    r = client.post("/api/v1/ops/external/kakao/probe")
     assert r.status_code == 200
-    assert "조회 실패" in r.text
+    assert r.json()["audit_id"] == 42
 
 
-def test_gemini_endpoint(monkeypatch) -> None:
-    """/api/ops/gemini 가 점검 결과를 반환(네트워크 목킹)."""
-    from app import gemini_client
+# ── db 뷰어 ──────────────────────────────────────────────────────────
 
-    async def _gemini():
-        return {"configured": True, "ok": True, "http_status": 200,
-                "latency_ms": 30, "model_count": 40}
+def test_db_rows_unknown_table_404(authed, monkeypatch) -> None:
+    async def fake_names():
+        return set()
 
-    monkeypatch.setattr(gemini_client, "check_gemini", _gemini)
-    r = client.get("/api/ops/gemini", headers=_basic("admin", "secret"))
-    assert r.status_code == 200
-    assert r.json()["ok"] is True and r.json()["model_count"] == 40
+    monkeypatch.setattr(repo, "hub_table_names", fake_names)
+    assert client.get("/api/v1/db/tables/nope").status_code == 404
 
 
-def test_db_tables_endpoint(monkeypatch) -> None:
-    """/api/db/tables 가 hub_data 테이블 목록을 반환."""
-    async def _tables():
-        return [{"table": "places", "rows": 2}]
-
-    monkeypatch.setattr(repo, "list_hub_tables", _tables)
-    r = client.get("/api/db/tables", headers=_basic("admin", "secret"))
-    assert r.status_code == 200
-    assert r.json()["schema"] == "hub_data"
-    assert r.json()["tables"][0]["table"] == "places"
-
-
-def test_db_rows_unknown_table_404(monkeypatch) -> None:
-    """존재하지 않는 테이블명은 404(화이트리스트 검증)."""
-    async def _names():
-        return {"places", "subscribed_grids"}
-
-    monkeypatch.setattr(repo, "hub_table_names", _names)
-    r = client.get("/api/db/tables/user_accounts",
-                   headers=_basic("admin", "secret"))
-    assert r.status_code == 404
-
-
-def test_db_rows_ok(monkeypatch) -> None:
-    """검증된 테이블은 행 페이지를 반환."""
-    async def _names():
+def test_db_rows_invalid_sort_422(authed, monkeypatch) -> None:
+    async def fake_names():
         return {"places"}
 
-    async def _browse(table, limit, offset):
-        return {
-            "table": table, "columns": ["content_id", "source"],
-            "rows": [{"content_id": "durunubi:C001",
-                      "source": "durunubi"}],
-            "total": 2, "limit": limit, "offset": offset,
-        }
+    async def fake_browse(*a, **k):
+        raise ValueError("unknown sort column: x")
 
-    monkeypatch.setattr(repo, "hub_table_names", _names)
-    monkeypatch.setattr(repo, "browse_table", _browse)
-    r = client.get("/api/db/tables/places?limit=1&offset=0",
-                   headers=_basic("admin", "secret"))
+    monkeypatch.setattr(repo, "hub_table_names", fake_names)
+    monkeypatch.setattr(repo, "browse_table", fake_browse)
+    r = client.get("/api/v1/db/tables/places?sort=x:asc")
+    assert r.status_code == 422
+
+
+# ── actions + audit ─────────────────────────────────────────────────
+
+def test_action_grid_toggle_records_audit(authed, monkeypatch) -> None:
+    recorded = {}
+
+    async def fake_toggle(gid, active):
+        return {"ok": True, "changed": True,
+                "before": {"is_active": True}, "after": {"is_active": active}}
+
+    async def fake_record(actor, action, **k):
+        recorded["action"] = action
+        recorded["actor"] = actor
+        return 99
+
+    monkeypatch.setattr(hub_client, "toggle_grid", fake_toggle)
+    monkeypatch.setattr(audit, "record", fake_record)
+    r = client.patch("/api/v1/actions/grids/3", json={"is_active": False})
     assert r.status_code == 200
-    body = r.json()
-    assert body["total"] == 2
-    assert body["columns"] == ["content_id", "source"]
+    assert recorded["action"] == "grids.toggle"
+    assert recorded["actor"] == "tester"
+
+
+# ── 프록시 에러 매핑 ─────────────────────────────────────────────────
+
+def test_proxy_upstream_error_propagates(authed, monkeypatch) -> None:
+    async def fake_users(*a, **k):
+        raise UpstreamError(404, {"detail": "not found"})
+
+    monkeypatch.setattr(bff_client, "list_users", fake_users)
+    assert client.get("/api/v1/users").status_code == 404
+
+
+def test_proxy_upstream_unavailable_502(authed, monkeypatch) -> None:
+    async def fake_users(*a, **k):
+        raise UpstreamUnavailable("connection refused")
+
+    monkeypatch.setattr(bff_client, "list_users", fake_users)
+    assert client.get("/api/v1/users").status_code == 502
