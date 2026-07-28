@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- build stage ----------------------------------------------------------
-# node:22-alpine has arm64 images, so this builds on a Raspberry Pi 4 too.
+# node:22-alpine ships multi-arch images, so this builds on amd64 and arm64 hosts.
 FROM node:22-alpine AS build
 WORKDIR /app
 

@@ -40,7 +40,7 @@ npm run typecheck  # 타입 검사만
 docker build -t map-admin-web .
 ```
 
-- `Dockerfile`: `node:22-alpine`에서 `npm ci && npm run build` → `nginx:alpine`에 `dist/`와 `nginx.conf` 복사. arm64(라즈베리파이 4) 호환.
+- `Dockerfile`: `node:22-alpine`에서 `npm ci && npm run build` → `nginx:alpine`에 `dist/`와 `nginx.conf` 복사. 두 베이스 이미지 모두 멀티아치라 amd64·arm64 호스트에서 빌드된다.
 - `nginx.conf`:
   - `location /api/` → `proxy_pass http://admin:8000;`
   - `location /` → `try_files $uri /index.html;` (SPA 폴백)
