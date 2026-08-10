@@ -7,7 +7,7 @@ MAP 운영 콘솔 백엔드. **cut 2: 순수 JSON API 서버.**
 `admin_data.admin_accounts`(bcrypt) + 서버측 세션(HttpOnly 쿠키)이다 — 초기
 cut 1 의 "단일 공유 HTTP Basic" 안은 폐기되었다.
 
-## 데이터 경로 / 경계 (SoT B9)
+## 데이터 경로 / 경계
 
 - **hub_data** — 읽기전용 직접 SELECT(역할 `map_admin`). DB 뷰어·폴링/예보/장소 집계.
 - **admin_data** — admin 소유 RW. `audit_logs`·`admin_accounts`·`admin_sessions`. Alembic 관리.
@@ -67,8 +67,10 @@ infra `db/init/10-admin.sh` 가 `ALTER SCHEMA admin_data OWNER TO map_admin` 을
 
 ## 실행 (map-service-infra 경유)
 
-admin(8002 API) + admin-web(8003 SPA)은 infra `docker-compose.yml` 에 편입되어
-공유 `./.env` 를 읽는다.
+admin(8002 API) + admin-web(8003 SPA)은 infra 의 **별도 스택**
+`docker-compose.admin.yml` 에 있고, 서비스 스택과 같은 `./.env` 를 읽는다.
+서비스 스택이 만든 네트워크에 얹히므로 **서비스 스택을 먼저 올려야 한다**.
+`--profile full` 로는 뜨지 않는다.
 
 ```bash
 # 1) infra/.env 에 admin 키 추가 (.env.example 참고): ADMIN_DATABASE_URL /
@@ -77,8 +79,10 @@ admin(8002 API) + admin-web(8003 SPA)은 infra `docker-compose.yml` 에 편입�
 # 2) map_admin 역할 + admin_data 소유 — db/init/10-admin.sh
 #    · 새 볼륨: postgres 최초 기동 시 자동
 #    · 기존 볼륨: docker compose exec postgres bash /docker-entrypoint-initdb.d/10-admin.sh
-docker compose --profile full up -d --build
-# 3) 브라우저로 http://127.0.0.1:8003/ (SPA 로그인)
+# 3) 서비스 스택이 뜬 뒤 관리자 스택 기동
+./scripts/map-up-admin.sh                # 콘솔만
+./scripts/map-up-admin.sh --monitoring   # 콘솔 + 지표
+# 4) 브라우저로 http://127.0.0.1:8003/ (SPA 로그인)
 #    API 직접: http://127.0.0.1:8002/api/v1/... (세션 쿠키 필요)
 ```
 

@@ -10,7 +10,7 @@ Create Date: 2026-07-13
 금지구역 CRUD·DLQ 재처리·외부 API 수동 프로브·회원 상세 열람)이 실행 후
 본 테이블에 1행을 남긴다.
 
-경계 원칙(SoT §8.1): admin 의 쓰기는 admin_data 단일 스키마 트랜잭션으로
+경계 원칙: admin 의 쓰기는 admin_data 단일 스키마 트랜잭션으로
 한정한다. target_* 는 타 스키마/서비스 대상을 외래키 없이 논리 텍스트로
 참조한다(cross-schema FK 없음).
 """
