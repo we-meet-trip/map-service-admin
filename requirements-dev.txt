@@ -1,0 +1,14 @@
+# admin-service 의 개발·테스트 전용 의존성.
+# 런타임 이미지에는 설치하지 않는다: pip install -r requirements.txt -r requirements-dev.txt
+#
+# 이 파일이 없던 동안 tests/ 는 있는데 실행기가 어디에도 선언돼 있지 않았다.
+# 다른 세 서비스(hub·agent·yolo)는 같은 이름으로 두고 있어 형태를 맞춘다.
+
+# pytest
+#   - tests/ 실행기.
+pytest>=8.0,<9.0
+
+# httpx
+#   - fastapi 의 TestClient 가 내부적으로 쓴다. 런타임 의존에 이미 들어 있지만
+#     테스트만 돌릴 때도 필요하므로 여기에도 적어 둔다.
+httpx>=0.27,<1.0
