@@ -105,7 +105,7 @@ npm run build                          # 프로덕션 정적 빌드(nginx 이미
 
 Set `ADMIN_CONTROL_DATABASE_URL` to a dedicated `map_admin_runtime` connection.
 Declare each test/prod target in `ADMIN_TARGETS`, including the default environment.
-Its `ADMIN_DATABASE_URL` is optional (API-only targets return 503 for SQL browse)
+Its `ADMIN_DATABASE_URL` and `ADMIN_REDIS_URL` are optional (API-only targets return 503 for SQL browse and explicit unconfigured diagnostics)
 and must be a separate read-only account. Target pools have read-only transactions,
 statement/connect/lock timeouts and two connections without overflow. No target
 falls back to the central DB or inherits another environment's API keys.

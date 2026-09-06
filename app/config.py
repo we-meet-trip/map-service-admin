@@ -173,14 +173,14 @@ def select_environment(name: str):
     else:
         if set(overrides) - _TARGET_FIELDS:
             raise ValueError("unknown or invalid environment")
-        required = {"ADMIN_REDIS_URL", "USER_BASE_URL", "AGENT_BASE_URL",
+        required = {"USER_BASE_URL", "AGENT_BASE_URL",
                     "HUB_BASE_URL", "INTERNAL_SERVICE_TOKEN"}
         if any(not overrides.get(key) for key in required):
             raise ValueError("environment connection settings incomplete")
         values = control_settings.model_dump()
         values.update({key: "" for key in _TARGET_SECRETS})
         # DB is optional for API-only targets. Never inherit the control/co-host DSN.
-        values.update({"ADMIN_DATABASE_URL": "", "OSRM_FOOT_BASE_URL": "",
+        values.update({"ADMIN_DATABASE_URL": "", "ADMIN_REDIS_URL": "", "OSRM_FOOT_BASE_URL": "",
                        "OSRM_BICYCLE_BASE_URL": "", "MONITORING_PANELS": []})
         values.update(overrides)
         selected = Settings.model_validate(values)

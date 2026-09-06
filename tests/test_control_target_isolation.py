@@ -66,3 +66,19 @@ def test_readonly_target_pool_separate_even_when_legacy_dsn_is_same(monkeypatch)
     assert "default_transaction_read_only=on" not in made[0][1]["connect_args"]["options"]
     assert "default_transaction_read_only=on" in made[1][1]["connect_args"]["options"]
     assert made[1][1]["max_overflow"] == 0
+
+
+def test_api_only_target_has_no_database_or_redis_fallback(monkeypatch):
+    from app import health_client, redis_probe
+    config = target()
+    config.pop("ADMIN_REDIS_URL")
+    monkeypatch.setattr(control_settings, "ADMIN_TARGETS", {"test": config})
+    token = select_environment("test")
+    try:
+        assert settings.ADMIN_REDIS_URL == ""
+        assert asyncio.run(health_client._check_redis())["configured"] is False
+        assert asyncio.run(health_client._check_postgres())["configured"] is False
+        for check in (redis_probe.streams_overview, redis_probe.gemini_quota, redis_probe.cache_stats):
+            assert asyncio.run(check()) == {"error": "not_configured", "configured": False}
+    finally:
+        reset_environment(token)
