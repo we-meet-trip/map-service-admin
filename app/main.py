@@ -131,6 +131,8 @@ app.include_router(jobs_router.router)
 app.include_router(actions_router.router)
 app.include_router(audit_router.router)
 app.include_router(operators_router.router)
+from app.routers import moderation_router
+app.include_router(moderation_router.router)
 
 
 @app.get("/health", include_in_schema=False)

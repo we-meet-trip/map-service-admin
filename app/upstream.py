@@ -12,6 +12,7 @@ admin 은 hub_data 쓰기·회원/잡/DLQ 조작을 소유 서비스 `/internal`
 from __future__ import annotations
 
 from typing import Any
+import re
 
 import httpx
 
@@ -42,18 +43,24 @@ async def request_json(
     *,
     params: dict[str, Any] | None = None,
     json: Any | None = None,
+    admin_actor: str | None = None,
 ) -> Any:
     """내부 위임 호출. 2xx 면 JSON, 4xx/5xx 면 UpstreamError, 연결오류면
     UpstreamUnavailable 를 발생."""
+    headers = _headers()
+    if admin_actor is not None:
+        if not re.fullmatch(r"admin_[1-9][0-9]*", admin_actor):
+            raise ValueError("invalid opaque admin actor")
+        headers["X-Admin-Actor"] = admin_actor
     try:
         async with httpx.AsyncClient(
             timeout=settings.INTERNAL_TIMEOUT_SEC
         ) as client:
             resp = await client.request(
-                method, url, params=params, json=json, headers=_headers()
+                method, url, params=params, json=json, headers=headers
             )
     except httpx.HTTPError as exc:
-        raise UpstreamUnavailable(str(exc)) from exc
+        raise UpstreamUnavailable(type(exc).__name__) from exc
 
     if resp.status_code >= 400:
         try:
