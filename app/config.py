@@ -51,8 +51,9 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    # [DB] map_admin DSN. hub_data SELECT + admin_data 소유 RW.
-    ADMIN_DATABASE_URL: str
+    # Explicit central runtime DSN. Legacy co-host deployments may keep ADMIN_DATABASE_URL.
+    ADMIN_CONTROL_DATABASE_URL: str = ""
+    ADMIN_DATABASE_URL: str = ""
     ADMIN_ENVIRONMENT: str = Field(default="test", pattern=r"^[a-z][a-z0-9_-]{0,31}$")
     # 다른 환경의 연결 값은 서버에만 둔다. API는 이름만 공개한다.
     ADMIN_TARGETS: dict[str, dict[str, Any]] = {}
@@ -161,23 +162,34 @@ def environment_names() -> list[str]:
 
 
 def select_environment(name: str):
-    if name == control_settings.ADMIN_ENVIRONMENT:
+    overrides = control_settings.ADMIN_TARGETS.get(name)
+    if overrides is None:
+        if name != control_settings.ADMIN_ENVIRONMENT:
+            raise ValueError("unknown or invalid environment")
+        if control_settings.ADMIN_CONTROL_DATABASE_URL:
+            raise ValueError("environment connection settings incomplete")
+        # Transitional co-host contract only; explicit central mode never falls back.
         selected = control_settings
     else:
-        overrides = control_settings.ADMIN_TARGETS.get(name)
-        if overrides is None or set(overrides) - _TARGET_FIELDS:
+        if set(overrides) - _TARGET_FIELDS:
             raise ValueError("unknown or invalid environment")
-        required = {"ADMIN_DATABASE_URL", "ADMIN_REDIS_URL", "USER_BASE_URL",
-                    "AGENT_BASE_URL", "HUB_BASE_URL", "INTERNAL_SERVICE_TOKEN"}
-        if required - set(overrides):
+        required = {"ADMIN_REDIS_URL", "USER_BASE_URL", "AGENT_BASE_URL",
+                    "HUB_BASE_URL", "INTERNAL_SERVICE_TOKEN"}
+        if any(not overrides.get(key) for key in required):
             raise ValueError("environment connection settings incomplete")
         values = control_settings.model_dump()
-        # 대상에 값이 없다고 중앙 환경의 API 키를 대신 사용해서는 안 된다.
         values.update({key: "" for key in _TARGET_SECRETS})
-        values.update({"OSRM_FOOT_BASE_URL": "", "OSRM_BICYCLE_BASE_URL": "", "MONITORING_PANELS": []})
+        # DB is optional for API-only targets. Never inherit the control/co-host DSN.
+        values.update({"ADMIN_DATABASE_URL": "", "OSRM_FOOT_BASE_URL": "",
+                       "OSRM_BICYCLE_BASE_URL": "", "MONITORING_PANELS": []})
         values.update(overrides)
         selected = Settings.model_validate(values)
     return _target_settings.set(selected), _target_name.set(name)
+
+
+def select_control():
+    """Authentication/readiness remain available even if no target is configured."""
+    return _target_settings.set(control_settings), _target_name.set(control_settings.ADMIN_ENVIRONMENT)
 
 
 def reset_environment(tokens) -> None:

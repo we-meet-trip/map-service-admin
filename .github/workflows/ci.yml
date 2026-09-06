@@ -37,3 +37,8 @@ jobs:
 
       - name: test
         run: pytest -q
+
+      - name: isolated control database and target outage
+        run: |
+          docker pull postgis/postgis:17-3.5
+          python scripts/verify-control-isolation.py

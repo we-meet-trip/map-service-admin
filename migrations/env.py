@@ -32,16 +32,18 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-dsn = os.environ.get("ADMIN_DATABASE_URL")
+dsn = os.environ.get("ADMIN_CONTROL_MIGRATION_DATABASE_URL")
+if not dsn and not os.environ.get("ADMIN_CONTROL_DATABASE_URL"):
+    dsn = os.environ.get("ADMIN_DATABASE_URL")
 if not dsn:
-    raise RuntimeError("ADMIN_DATABASE_URL 환경변수가 설정되지 않았다.")
+    raise RuntimeError("separate ADMIN_CONTROL_MIGRATION_DATABASE_URL is required in central mode")
 # 동기 엔진용으로 async 드라이버 토큰만 정규화한다. psycopg3(+psycopg)는
 # sync/async 겸용이라 그대로 두면 create_engine 이 동기로 사용한다.
 sync_dsn = (
     dsn.replace("+psycopg_async", "+psycopg")
        .replace("postgresql+asyncpg", "postgresql+psycopg")
 )
-config.set_main_option("sqlalchemy.url", sync_dsn)
+config.set_main_option("sqlalchemy.url", sync_dsn.replace("%", "%%"))
 
 target_metadata = None
 

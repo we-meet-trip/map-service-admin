@@ -100,3 +100,28 @@ npm run build                          # 프로덕션 정적 빌드(nginx 이미
 - `/ops/health` 롤업에 postgres/redis/osrm 포함.
 - 격자 토글/KMA 강제갱신/DLQ 재처리 → `audit_logs` 1행 + `/api/v1/audit` 노출.
 - 단위 테스트: `pytest`(`tests/test_smoke.py` — DB/Redis/업스트림 모킹).
+
+## Independent control database
+
+Set `ADMIN_CONTROL_DATABASE_URL` to a dedicated `map_admin_runtime` connection.
+Declare each test/prod target in `ADMIN_TARGETS`, including the default environment.
+Its `ADMIN_DATABASE_URL` is optional (API-only targets return 503 for SQL browse)
+and must be a separate read-only account. Target pools have read-only transactions,
+statement/connect/lock timeouts and two connections without overflow. No target
+falls back to the central DB or inherits another environment's API keys.
+Authentication, readiness and operator management use only the control DB; missing
+or invalid target configuration is rejected at that target's request boundary.
+
+For a **new isolated database**, a provisioner runs `scripts/bootstrap-control-db.sql`
+with private `ADMIN_CONTROL_MIGRATION_PASSWORD` and `ADMIN_CONTROL_RUNTIME_PASSWORD`.
+Run `alembic upgrade head` in a one-shot job with
+`ADMIN_CONTROL_MIGRATION_DATABASE_URL`, then run `scripts/grant-control-runtime.sql`
+as the schema owner. The serving process uses `ADMIN_RUN_MIGRATIONS=false` and does
+not receive the migration secret. No `hub_data` schema is needed. Existing schemas,
+roles, volumes and applied revisions are not rewritten by this flow. The legacy
+co-host `ADMIN_DATABASE_URL` contract remains only until a reviewed migration.
+
+Across hosts, use private TLS endpoints and certificate-verifying PostgreSQL DSNs
+(`sslmode=verify-full` with the correct root CA); SQL access is transitional until
+Hub management APIs replace browsing. Endpoint reachability and actual DB grants
+must be checked on each environment; transaction read-only is defense in depth.
