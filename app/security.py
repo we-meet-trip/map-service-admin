@@ -9,10 +9,10 @@ username 을 반환하고, 무효면 401 을 던진다. 감사 로그의 actor �
 """
 from __future__ import annotations
 
-from fastapi import HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, status
 
-from app import accounts
-from app.config import settings
+from app import accounts, audit
+from app.config import settings, environment_name
 
 
 async def require_operator(request: Request) -> str:
@@ -27,4 +27,28 @@ async def require_operator(request: Request) -> str:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="authentication required",
         )
+    permissions = await accounts.permissions(operator)
+    if permissions is None:
+        raise HTTPException(401, "authentication required")
+    role = permissions["role"]
+    control_request = request.url.path.startswith("/api/v1/auth/") or request.url.path == "/api/v1/environments"
+    if not control_request and role != "owner" and environment_name() not in permissions["allowed_environments"]:
+        raise HTTPException(403, "environment access denied")
+    request.state.operator_permissions = permissions
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        if role == "viewer":
+            raise HTTPException(403, "read-only operator")
+        if request.headers.get("X-Map-Environment") != environment_name():
+            raise HTTPException(403, "explicit environment header required")
+        # 서비스 액션보다 먼저 감사 저장 성공을 확인한다.
+        request.state.audit_id = await audit.record(operator, "request.started",
+            target_service="admin", target_id=request.url.path,
+            params={"method": request.method}, status="started")
+    return operator
+
+
+async def require_owner(request: Request, operator: str = Depends(require_operator)) -> str:
+    permissions = getattr(request.state, "operator_permissions", None) or await accounts.permissions(operator)
+    if permissions is None or permissions["role"] != "owner":
+        raise HTTPException(403, "owner access required")
     return operator

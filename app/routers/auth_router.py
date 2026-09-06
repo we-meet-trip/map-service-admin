@@ -14,7 +14,7 @@ from fastapi import (
     Response,
     status,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app import accounts
 from app.config import settings
@@ -24,8 +24,8 @@ router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=100)
+    password: str = Field(min_length=1, max_length=1024)
 
 
 def _set_session_cookie(response: Response, session_id: str) -> None:
@@ -42,8 +42,10 @@ def _set_session_cookie(response: Response, session_id: str) -> None:
 
 
 @router.post("/login")
-async def login(body: LoginRequest, response: Response) -> dict[str, str]:
+async def login(body: LoginRequest, response: Response, request: Request) -> dict[str, str]:
     """자격 검증 후 세션 발급. 실패 시 401."""
+    if not await accounts.login_allowed(body.username, request.client.host if request.client else "unknown"):
+        raise HTTPException(429, "too many login attempts", headers={"Retry-After": str(settings.ADMIN_LOGIN_WINDOW_SECONDS)})
     account_id = await accounts.authenticate(body.username, body.password)
     if account_id is None:
         raise HTTPException(
@@ -52,7 +54,8 @@ async def login(body: LoginRequest, response: Response) -> dict[str, str]:
         )
     session_id, _ = await accounts.create_session(account_id)
     _set_session_cookie(response, session_id)
-    return {"username": body.username}
+    record = await accounts.permissions(body.username)
+    return {"username": body.username, "role": record["role"] if record else "viewer"}
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
@@ -68,6 +71,7 @@ async def logout(request: Request, response: Response) -> Response:
 
 
 @router.get("/me")
-async def me(operator: str = Depends(require_operator)) -> dict[str, str]:
+async def me(operator: str = Depends(require_operator)) -> dict:
     """현재 로그인한 운영자 username."""
-    return {"username": operator}
+    record = await accounts.permissions(operator)
+    return {"username": operator, "role": record["role"] if record else "viewer"}

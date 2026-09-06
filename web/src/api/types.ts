@@ -15,6 +15,7 @@ export type JsonValue =
 
 export interface AuthUser {
   username: string;
+  role?: 'owner' | 'operator' | 'viewer';
 }
 
 /* ------------------------------ ops ---------------------------------- */

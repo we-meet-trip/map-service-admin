@@ -3,6 +3,8 @@ import { useAuth } from '../../providers/AuthProvider';
 import { ThemeToggle } from '../ThemeToggle';
 import { Spinner } from '../Spinner';
 import { IconLogout } from '../Icons';
+import { useQuery } from '@tanstack/react-query';
+import { get, selectedEnvironment, selectEnvironment } from '../../api/client';
 
 interface TopBarProps {
   onOpenMenu: () => void;
@@ -35,6 +37,8 @@ function MenuButton({ onClick }: { onClick: () => void }) {
 export function TopBar({ onOpenMenu }: TopBarProps) {
   const { user, logout } = useAuth();
   const [loggingOut, setLoggingOut] = useState(false);
+  const targets = useQuery({ queryKey: ['environments'],
+    queryFn: () => get<{ environments: string[] }>('/v1/environments') });
 
   async function handleLogout() {
     setLoggingOut(true);
@@ -50,6 +54,14 @@ export function TopBar({ onOpenMenu }: TopBarProps) {
   return (
     <header className="sticky top-0 z-40 flex h-16 items-center gap-3 border-b border-border bg-surface px-4">
       <MenuButton onClick={onOpenMenu} />
+      <label className="flex items-center gap-2 text-sm font-semibold">
+        대상 환경
+        <select aria-label="대상 환경" className="rounded border border-border bg-surface px-2 py-1"
+          value={selectedEnvironment()} onChange={(event) => selectEnvironment(event.target.value)}>
+          {(targets.data?.environments ?? [selectedEnvironment()]).map((name) =>
+            <option key={name} value={name}>{name === 'prod' ? '운영 (prod)' : name}</option>)}
+        </select>
+      </label>
       <div className="flex-1" />
       <ThemeToggle />
       <div className="hidden items-center gap-2 rounded-lg border border-border bg-surface-2 px-2.5 py-1.5 sm:flex">

@@ -8,6 +8,16 @@
 
 const API_BASE = '/api';
 
+export function selectedEnvironment(): string {
+  return sessionStorage.getItem('map.environment') ?? 'test';
+}
+
+export function selectEnvironment(name: string): void {
+  sessionStorage.setItem('map.environment', name);
+  // 진행 중인 조회와 캐시가 새 대상 화면에 섞이지 않게 새로 연다.
+  window.location.reload();
+}
+
 export class ApiError extends Error {
   readonly status: number;
   readonly body: unknown;
@@ -47,7 +57,9 @@ export function buildQuery(params?: QueryParams): string {
 
 /** Absolute API URL for a path — used for direct links (e.g. CSV export). */
 export function apiUrl(path: string): string {
-  return `${API_BASE}${path}`;
+  const url = new URL(`${API_BASE}${path}`, window.location.origin);
+  url.searchParams.set('environment', selectedEnvironment());
+  return `${url.pathname}${url.search}`;
 }
 
 async function parseBody(res: Response): Promise<unknown> {
@@ -95,7 +107,10 @@ async function request<T>(
   path: string,
   options: RequestOptions = {},
 ): Promise<T> {
-  const headers: Record<string, string> = { Accept: 'application/json' };
+  const environment = selectedEnvironment();
+  const headers: Record<string, string> = {
+    Accept: 'application/json', 'X-Map-Environment': environment,
+  };
   const hasBody = options.body !== undefined;
   if (hasBody) headers['Content-Type'] = 'application/json';
 
@@ -123,6 +138,9 @@ async function request<T>(
   }
 
   const body = await parseBody(res);
+  if (environment !== selectedEnvironment()) {
+    throw new ApiError(409, '조회 대상이 변경됐습니다. 다시 확인하세요.', undefined);
+  }
   if (!res.ok) {
     throw new ApiError(res.status, messageFromBody(res.status, body), body);
   }

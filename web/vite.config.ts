@@ -21,10 +21,10 @@ export default defineConfig({
     rollupOptions: {
       output: {
         // Split heavy vendors so the app shell and charts cache independently.
-        manualChunks: {
-          react: ['react', 'react-dom', 'react-router-dom'],
-          query: ['@tanstack/react-query'],
-          charts: ['recharts'],
+        manualChunks(id) {
+          if (id.includes('/node_modules/@tanstack/')) return 'query';
+          if (id.includes('/node_modules/recharts/') || id.includes('/node_modules/d3-')) return 'charts';
+          if (/\/node_modules\/(react|react-dom|react-router|react-router-dom)\//.test(id)) return 'react';
         },
       },
     },

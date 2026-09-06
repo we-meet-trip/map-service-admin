@@ -1,8 +1,8 @@
 """운영 감사 로그 (admin_data.audit_logs).
 
 모든 운영 액션(격자 토글·KMA 강제갱신·금지구역 CRUD·DLQ 재처리·외부 API
-수동 프로브·회원 상세 열람) 실행 후 1행을 기록한다. 기록 실패는 액션을
-되돌리지 못하므로(이미 수행됨) 예외를 전파하지 않고 None 을 반환한다.
+수동 프로브·회원 상세 열람)의 환경과 결과를 중앙 저장소에 기록한다.
+변경 요청은 실행 전 시작 기록을 남기며, 감사 저장 실패는 503을 반환한다.
 
 호출 관계:
   - app.routers.actions_router / users_router / ops_router 의 각 액션 후 record
@@ -17,7 +17,9 @@ from typing import Any
 
 from sqlalchemy import text
 
-from app.db import get_engine
+from app.db import get_control_engine as get_engine
+from app.config import environment_name, control_settings
+from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +47,8 @@ async def record(
     after: Any = None,
     status: str = "ok",
     request_ip: str | None = None,
-) -> int | None:
-    """audit_logs 에 1행 INSERT 하고 id 를 반환한다(실패 시 None).
+) -> int:
+    """audit_logs 에 1행 INSERT 하고 id 를 반환한다(실패 시 503).
 
     params/before/after 는 dict/list 를 받아 JSONB 로 저장한다.
     """
@@ -70,7 +72,7 @@ async def record(
                     {
                         "actor": actor,
                         "action": action,
-                        "tsvc": target_service,
+                        "tsvc": f"{environment_name()}:{target_service or 'admin'}",
                         "tsch": target_schema,
                         "ttab": target_table,
                         "tid": target_id,
@@ -83,10 +85,9 @@ async def record(
                 )
             ).scalar_one()
         return int(new_id)
-    except Exception as exc:  # 감사 기록 실패는 액션을 되돌릴 수 없으므로 흡수
-        logger.error("audit record failed action=%s actor=%s reason=%s",
-                     action, actor, exc)
-        return None
+    except Exception as exc:
+        logger.error("audit record failed action=%s error=%s", action, type(exc).__name__)
+        raise HTTPException(503, "audit unavailable; check operation status before retry") from exc
 
 
 async def list_logs(
@@ -99,8 +100,10 @@ async def list_logs(
     offset: int = 0,
 ) -> dict[str, Any]:
     """감사 로그 조회(필터 + 페이지네이션, 최신순)."""
-    conds: list[str] = []
-    params: dict[str, Any] = {"lim": limit, "off": offset}
+    # 중앙 계정/감사 DB를 공유해도 다른 환경의 사용자 정보는 보이지 않는다.
+    conds = ["(split_part(target_service, ':', 1) = :env OR (:legacy AND position(':' in coalesce(target_service,'')) = 0))"]
+    params: dict[str, Any] = {"lim": limit, "off": offset,
+        "env": environment_name(), "legacy": environment_name() == control_settings.ADMIN_ENVIRONMENT}
     if actor:
         conds.append("actor = :actor")
         params["actor"] = actor
@@ -139,3 +142,15 @@ async def list_logs(
         "limit": limit,
         "offset": offset,
     }
+
+
+async def finish(request_id: int, http_status: int) -> None:
+    """실행 전 기록에 최종 HTTP 결과를 연결한다. 응답 본문/비밀은 저장하지 않는다."""
+    try:
+        async with get_engine().begin() as conn:
+            await conn.execute(text("UPDATE admin_data.audit_logs SET status=:status, after_json=CAST(:result AS jsonb) WHERE id=:id"),
+                {"id": request_id, "status": "ok" if http_status < 400 else "error",
+                 "result": json.dumps({"http_status": http_status})})
+    except Exception as exc:
+        logger.error("audit completion failed error=%s", type(exc).__name__)
+        raise HTTPException(503, "audit unavailable; check operation status before retry") from exc

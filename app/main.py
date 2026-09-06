@@ -16,15 +16,15 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import HTMLResponse, JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 
-from app import accounts
-from app.config import settings
+from app import accounts, audit
+from app.config import settings, control_settings, select_environment, reset_environment
 from app.db import dispose_engine
 from app.routers import (
     actions_router,
@@ -34,6 +34,7 @@ from app.routers import (
     jobs_router,
     ops_router,
     users_router,
+    operators_router,
 )
 from app.security import require_operator
 
@@ -48,10 +49,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     uvicorn 기동 전에 이미 수행한다(entrypoint.sh).
     """
     logger.info("admin: startup")
-    try:
-        await accounts.bootstrap_if_empty()
-    except Exception as exc:  # DB 일시 장애 등 — 기동은 계속(로그인만 지연)
-        logger.error("admin: account bootstrap failed: %s", exc)
+    # 잘못된 대상은 요청이 오기 전에 드러나게 한다.
+    for name in control_settings.ADMIN_TARGETS:
+        token = select_environment(name)
+        reset_environment(token)
+    await accounts.bootstrap_if_empty()
     try:
         yield
     finally:
@@ -67,6 +69,34 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+
+
+@app.middleware("http")
+async def target_environment(request: Request, call_next):
+    name = request.headers.get("X-Map-Environment") or request.query_params.get("environment") or control_settings.ADMIN_ENVIRONMENT
+    if request.url.path.startswith("/api/v1/auth/") or request.url.path == "/api/v1/environments":
+        name = control_settings.ADMIN_ENVIRONMENT
+    try:
+        tokens = select_environment(name)
+    except ValueError:
+        return JSONResponse({"detail": "unknown or incomplete environment"}, status_code=400)
+    try:
+        try:
+            response = await call_next(request)
+        except Exception:
+            if request_id := getattr(request.state, "audit_id", None):
+                await audit.finish(request_id, 500)
+            raise
+        if request_id := getattr(request.state, "audit_id", None):
+            try:
+                await audit.finish(request_id, response.status_code)
+            except HTTPException as exc:
+                response = JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+        response.headers["X-Map-Environment"] = name
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    finally:
+        reset_environment(tokens)
 
 # CORS — dev SPA(Vite) 교차출처 + 세션 쿠키. 프로덕션은 nginx same-origin 이라
 # ADMIN_CORS_ORIGINS 를 비워 두면 교차출처를 허용하지 않는다.
@@ -92,12 +122,25 @@ app.include_router(users_router.router)
 app.include_router(jobs_router.router)
 app.include_router(actions_router.router)
 app.include_router(audit_router.router)
+app.include_router(operators_router.router)
 
 
 @app.get("/health", include_in_schema=False)
 async def health() -> dict[str, str]:
     """liveness(인증 없음). DB 를 건드리지 않는 순수 liveness."""
     return {"status": "ok", "service": "admin"}
+
+
+@app.get("/health/ready", include_in_schema=False)
+async def ready():
+    from app.db import get_control_engine
+    from sqlalchemy import text
+    try:
+        async with get_control_engine().connect() as conn:
+            count = (await conn.execute(text("SELECT count(*) FROM admin_data.admin_accounts WHERE is_active AND role='owner'"))).scalar_one()
+        return JSONResponse({"status": "ok" if count else "unavailable"}, status_code=200 if count else 503)
+    except Exception:
+        return JSONResponse({"status": "unavailable"}, status_code=503)
 
 
 @app.get("/openapi.json", include_in_schema=False)

@@ -35,9 +35,12 @@ client = TestClient(app)
 
 
 @pytest.fixture
-def authed():
+def authed(monkeypatch):
     """require_operator 를 'tester' 로 오버라이드한 인증 컨텍스트."""
     app.dependency_overrides[require_operator] = lambda: "tester"
+    async def fake_permissions(_):
+        return {"id": 1, "role": "owner", "allowed_environments": [], "is_active": True}
+    monkeypatch.setattr(accounts, "permissions", fake_permissions)
     yield
     app.dependency_overrides.pop(require_operator, None)
 
@@ -62,6 +65,8 @@ def test_protected_requires_session(path) -> None:
 # ── 로그인 ───────────────────────────────────────────────────────────
 
 def test_login_success(monkeypatch) -> None:
+    async def allowed(*_): return True
+    monkeypatch.setattr(accounts, "login_allowed", allowed)
     async def fake_auth(u, p):
         return 7
 
@@ -71,14 +76,18 @@ def test_login_success(monkeypatch) -> None:
 
     monkeypatch.setattr(accounts, "authenticate", fake_auth)
     monkeypatch.setattr(accounts, "create_session", fake_session)
+    async def permissions(_): return {"role": "owner"}
+    monkeypatch.setattr(accounts, "permissions", permissions)
     r = client.post("/api/v1/auth/login",
                     json={"username": "op", "password": "pw"})
     assert r.status_code == 200
-    assert r.json() == {"username": "op"}
+    assert r.json() == {"username": "op", "role": "owner"}
     assert "admin_session" in r.cookies
 
 
 def test_login_bad_credentials(monkeypatch) -> None:
+    async def allowed(*_): return True
+    monkeypatch.setattr(accounts, "login_allowed", allowed)
     async def fake_auth(u, p):
         return None
 
@@ -89,7 +98,7 @@ def test_login_bad_credentials(monkeypatch) -> None:
 
 
 def test_me(authed) -> None:
-    assert client.get("/api/v1/auth/me").json() == {"username": "tester"}
+    assert client.get("/api/v1/auth/me").json() == {"username": "tester", "role": "owner"}
 
 
 # ── ops ──────────────────────────────────────────────────────────────

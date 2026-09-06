@@ -9,7 +9,10 @@ RO(DB2 스트림·DB3 Gemini 쿼터·DB4 캐시) + hub/BFF `/internal` 위임 + 
 """
 from __future__ import annotations
 
-from pydantic import BaseModel, SecretStr, field_validator
+from contextvars import ContextVar
+from typing import Any
+
+from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -50,6 +53,11 @@ class Settings(BaseSettings):
 
     # [DB] map_admin DSN. hub_data SELECT + admin_data 소유 RW.
     ADMIN_DATABASE_URL: str
+    ADMIN_ENVIRONMENT: str = Field(default="test", pattern=r"^[a-z][a-z0-9_-]{0,31}$")
+    # 다른 환경의 연결 값은 서버에만 둔다. API는 이름만 공개한다.
+    ADMIN_TARGETS: dict[str, dict[str, Any]] = {}
+    ADMIN_LOGIN_MAX_ATTEMPTS: int = Field(default=10, ge=1, le=1000)
+    ADMIN_LOGIN_WINDOW_SECONDS: int = Field(default=300, ge=1, le=86400)
     # 쿼리 statement timeout(초). 엔진 connect_args 에 반영(느린 조회 상한).
     DB_TIMEOUT_SEC: float = 5.0
 
@@ -119,4 +127,59 @@ class Settings(BaseSettings):
 
 
 # 프로세스 단위 싱글톤. 다른 모듈은 이 객체를 직접 임포트한다.
-settings = Settings()
+control_settings = Settings()
+_target_settings: ContextVar[Settings | None] = ContextVar("admin_target", default=None)
+_target_name: ContextVar[str | None] = ContextVar("admin_target_name", default=None)
+
+_TARGET_FIELDS = {
+    "ADMIN_DATABASE_URL", "ADMIN_REDIS_URL", "USER_BASE_URL", "AGENT_BASE_URL",
+    "HUB_BASE_URL", "OSRM_FOOT_BASE_URL", "OSRM_BICYCLE_BASE_URL",
+    "INTERNAL_SERVICE_TOKEN", "GEMINI_API_KEY", "KAKAO_REST_API_KEY",
+    "KMA_SERVICE_KEY", "TOUR_API_SERVICE_KEY", "NAVER_CLIENT_ID",
+    "NAVER_CLIENT_SECRET", "MONITORING_PANELS", "GEMINI_RPD_CAP",
+}
+_TARGET_SECRETS = {
+    "INTERNAL_SERVICE_TOKEN", "GEMINI_API_KEY", "KAKAO_REST_API_KEY",
+    "KMA_SERVICE_KEY", "TOUR_API_SERVICE_KEY", "NAVER_CLIENT_ID", "NAVER_CLIENT_SECRET",
+}
+
+
+class _RequestSettings:
+    def __getattr__(self, name: str):
+        return getattr(_target_settings.get() or control_settings, name)
+
+
+settings = _RequestSettings()
+
+
+def environment_name() -> str:
+    return _target_name.get() or control_settings.ADMIN_ENVIRONMENT
+
+
+def environment_names() -> list[str]:
+    return sorted({control_settings.ADMIN_ENVIRONMENT, *control_settings.ADMIN_TARGETS})
+
+
+def select_environment(name: str):
+    if name == control_settings.ADMIN_ENVIRONMENT:
+        selected = control_settings
+    else:
+        overrides = control_settings.ADMIN_TARGETS.get(name)
+        if overrides is None or set(overrides) - _TARGET_FIELDS:
+            raise ValueError("unknown or invalid environment")
+        required = {"ADMIN_DATABASE_URL", "ADMIN_REDIS_URL", "USER_BASE_URL",
+                    "AGENT_BASE_URL", "HUB_BASE_URL", "INTERNAL_SERVICE_TOKEN"}
+        if required - set(overrides):
+            raise ValueError("environment connection settings incomplete")
+        values = control_settings.model_dump()
+        # 대상에 값이 없다고 중앙 환경의 API 키를 대신 사용해서는 안 된다.
+        values.update({key: "" for key in _TARGET_SECRETS})
+        values.update({"OSRM_FOOT_BASE_URL": "", "OSRM_BICYCLE_BASE_URL": "", "MONITORING_PANELS": []})
+        values.update(overrides)
+        selected = Settings.model_validate(values)
+    return _target_settings.set(selected), _target_name.set(name)
+
+
+def reset_environment(tokens) -> None:
+    _target_settings.reset(tokens[0])
+    _target_name.reset(tokens[1])
