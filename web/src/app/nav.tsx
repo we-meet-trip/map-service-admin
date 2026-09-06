@@ -21,6 +21,7 @@ export interface NavItem {
 }
 
 export const NAV_ITEMS: NavItem[] = [
+  { to: '/operators', label: '운영자 계정', icon: <IconUsers />, description: '개인 계정 · 환경 권한 · 세션 회수' },
   {
     to: '/',
     label: '개요',

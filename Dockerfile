@@ -33,9 +33,9 @@ COPY --chown=app:app entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
 USER app
 EXPOSE 8000
-# /health(app.main:health)가 200 이면 healthy. 표준 라이브러리만 사용.
+# 중앙 계정 저장소까지 사용할 수 있어야 healthy. 표준 라이브러리만 사용.
 # start-period 를 넉넉히(45s) 준다 — 기동 시 alembic upgrade 가 선행하므로.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
-  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=5).status==200 else 1)"
+  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health/ready', timeout=5).status==200 else 1)"
 # 엔트리포인트: alembic upgrade head → uvicorn (app.entrypoint.sh 참조).
 ENTRYPOINT ["./entrypoint.sh"]

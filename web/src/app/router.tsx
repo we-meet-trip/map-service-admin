@@ -12,6 +12,7 @@ import { DbPage } from '../pages/DbPage';
 import { AuditPage } from '../pages/AuditPage';
 import { MonitoringPage } from '../pages/MonitoringPage';
 import { NotFoundPage } from '../pages/NotFoundPage';
+import { OperatorsPage } from '../pages/OperatorsPage';
 
 export const router = createBrowserRouter([
   {
@@ -30,6 +31,7 @@ export const router = createBrowserRouter([
           { path: 'db', element: <DbPage /> },
           { path: 'audit', element: <AuditPage /> },
           { path: 'monitoring', element: <MonitoringPage /> },
+          { path: 'operators', element: <OperatorsPage /> },
           { path: '*', element: <NotFoundPage /> },
         ],
       },

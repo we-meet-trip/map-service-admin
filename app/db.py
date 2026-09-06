@@ -16,34 +16,38 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from app.config import settings
+from app.config import settings, control_settings
 
-_engine: AsyncEngine | None = None
+_engines: dict[str, AsyncEngine] = {}
 
 
-def get_engine() -> AsyncEngine:
+def get_engine(*, control: bool = False) -> AsyncEngine:
     """async 엔진 싱글톤 접근자.
 
     최초 호출 시 settings.ADMIN_DATABASE_URL(map_admin DSN)로 엔진을 만든다.
     statement_timeout(ms)을 libpq options 로 주입해 모든 문장에 상한을 건다.
     """
-    global _engine
-    if _engine is None:
-        timeout_ms = int(settings.DB_TIMEOUT_SEC * 1000)
-        _engine = create_async_engine(
-            settings.ADMIN_DATABASE_URL,
+    config = control_settings if control else settings
+    url = config.ADMIN_DATABASE_URL
+    if url not in _engines:
+        timeout_ms = int(config.DB_TIMEOUT_SEC * 1000)
+        _engines[url] = create_async_engine(
+            url,
             pool_size=5,
             max_overflow=5,
             pool_pre_ping=True,
             future=True,
             connect_args={"options": f"-c statement_timeout={timeout_ms}"},
         )
-    return _engine
+    return _engines[url]
+
+
+def get_control_engine() -> AsyncEngine:
+    return get_engine(control=True)
 
 
 async def dispose_engine() -> None:
     """엔진과 풀을 정리한다. app.main lifespan 종료 시 1회 호출."""
-    global _engine
-    if _engine is not None:
-        await _engine.dispose()
-        _engine = None
+    for engine in _engines.values():
+        await engine.dispose()
+    _engines.clear()

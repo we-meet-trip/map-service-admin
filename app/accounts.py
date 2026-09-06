@@ -12,13 +12,16 @@ from __future__ import annotations
 
 import logging
 import uuid
+import hashlib
+import json
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
 from sqlalchemy import text
 
-from app.config import settings
-from app.db import get_engine
+from app.config import settings, control_settings
+from app.db import get_control_engine as get_engine
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +45,7 @@ async def bootstrap_if_empty() -> None:
     """admin_accounts 가 비어 있고 부트스트랩 자격이 설정돼 있으면 1회 시드한다.
 
     이미 계정이 하나라도 있으면 아무 것도 하지 않는다(멱등). 자격 미설정이면
-    경고만 남기고 넘어간다(로그인 불가 상태 — 운영자가 자격을 채워야 한다).
+    기동을 실패시킨다(로그인 불가 상태를 healthy로 보고하지 않는다).
     """
     user = settings.ADMIN_BOOTSTRAP_USER.strip()
     pw = settings.ADMIN_BOOTSTRAP_PASSWORD.get_secret_value()
@@ -59,7 +62,7 @@ async def bootstrap_if_empty() -> None:
                 "admin_accounts empty and bootstrap creds not set — no "
                 "operator can log in until an account exists"
             )
-            return
+            raise RuntimeError("admin bootstrap credentials required for empty account store")
         await conn.execute(
             text(
                 "INSERT INTO admin_data.admin_accounts "
@@ -88,11 +91,11 @@ async def authenticate(username: str, password: str) -> int | None:
         ).mappings().first()
     if row is None:
         # 타이밍 완화용 더미 검증(항상 실패).
-        verify_password(password, "$2b$12$" + "x" * 53)
+        await asyncio.to_thread(verify_password, password, "$2b$12$" + "x" * 53)
         return None
     if not row["is_active"]:
         return None
-    if not verify_password(password, row["password_hash"]):
+    if not await asyncio.to_thread(verify_password, password, row["password_hash"]):
         return None
     return int(row["id"])
 
@@ -168,3 +171,53 @@ async def delete_session(session_id: str | None) -> None:
             ),
             {"s": session_id},
         )
+
+
+async def login_allowed(username: str, address: str) -> bool:
+    # 사용자명과 주소 원문은 제한용 테이블에 남기지 않는다.
+    buckets = [hashlib.sha256(v.encode()).hexdigest() for v in ("u:" + username, "ip:" + address)]
+    window = control_settings.ADMIN_LOGIN_WINDOW_SECONDS
+    cap = control_settings.ADMIN_LOGIN_MAX_ATTEMPTS
+    async with get_engine().begin() as conn:
+        await conn.execute(text("DELETE FROM admin_data.login_attempts WHERE expires_at < now()"))
+        for bucket in buckets:
+            count = (await conn.execute(text("""
+                INSERT INTO admin_data.login_attempts(bucket, attempts, expires_at)
+                VALUES (:b, 1, now() + (:w * interval '1 second'))
+                ON CONFLICT (bucket) DO UPDATE SET attempts = admin_data.login_attempts.attempts + 1
+                RETURNING attempts
+            """), {"b": bucket, "w": window})).scalar_one()
+            if count > cap:
+                return False
+    return True
+
+
+async def permissions(username: str) -> dict | None:
+    async with get_engine().connect() as conn:
+        row = (await conn.execute(text("SELECT id, username, role, allowed_environments, is_active FROM admin_data.admin_accounts WHERE username=:u"), {"u": username})).mappings().first()
+    return dict(row) if row and row["is_active"] else None
+
+
+async def list_accounts() -> list[dict]:
+    async with get_engine().connect() as conn:
+        rows = (await conn.execute(text("SELECT id, username, role, allowed_environments, is_active, created_at FROM admin_data.admin_accounts ORDER BY id"))).mappings().all()
+    return [dict(row) for row in rows]
+
+
+async def create_account(username: str, password: str, role: str, environments: list[str], active: bool = True) -> int:
+    hashed = await asyncio.to_thread(hash_password, password)
+    async with get_engine().begin() as conn:
+        return int((await conn.execute(text("INSERT INTO admin_data.admin_accounts(username,password_hash,role,allowed_environments,is_active) VALUES (:u,:p,:r,CAST(:e AS jsonb),:a) RETURNING id"), {"u": username, "p": hashed, "r": role, "e": json.dumps(environments), "a": active})).scalar_one())
+
+
+async def update_account(account_id: int, *, active: bool, role: str,
+                         environments: list[str], password: str | None) -> None:
+    hashed = await asyncio.to_thread(hash_password, password) if password else None
+    async with get_engine().begin() as conn:
+        owners = list((await conn.execute(text("SELECT id FROM admin_data.admin_accounts WHERE is_active AND role='owner' ORDER BY id FOR UPDATE"))).scalars())
+        if account_id in owners and len(owners) == 1 and (not active or role != 'owner'):
+            raise ValueError("마지막 소유자 계정은 비활성화하거나 권한을 낮출 수 없습니다.")
+        result = await conn.execute(text("UPDATE admin_data.admin_accounts SET is_active=:a, role=:r, allowed_environments=CAST(:e AS jsonb), password_hash=COALESCE(:p,password_hash) WHERE id=:id"), {"a": active, "r": role, "e": json.dumps(environments), "p": hashed, "id": account_id})
+        if result.rowcount != 1:
+            raise LookupError("account not found")
+        await conn.execute(text("DELETE FROM admin_data.admin_sessions WHERE account_id=:id"), {"id": account_id})

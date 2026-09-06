@@ -25,10 +25,11 @@ from app.config import settings
 from app.db import get_engine
 
 # (표시명, base_url, health path)
-_HTTP_TARGETS: list[tuple[str, str, str]] = [
+def _http_targets() -> list[tuple[str, str, str]]:
+    return [
     ("user", settings.USER_BASE_URL, "/actuator/health"),
-    ("agent", settings.AGENT_BASE_URL, "/health"),
-    ("hub", settings.HUB_BASE_URL, "/health"),
+    ("agent", settings.AGENT_BASE_URL, "/health/ready"),
+    ("hub", settings.HUB_BASE_URL, "/health/ready"),
 ]
 
 
@@ -40,7 +41,7 @@ def _is_up(body: Any) -> bool:
             return True
         if status:
             return False
-    return True  # 200 이지만 형식 미상 → reachable
+    return False
 
 
 async def _check_http(
@@ -144,7 +145,7 @@ async def rollup() -> list[dict[str, Any]]:
     """전 대상(서비스 3 + 인프라 2 + 라우팅 2)을 동시 조회해 리스트로 반환."""
     async with httpx.AsyncClient() as client:
         http_checks = [
-            _check_http(client, n, b, p) for (n, b, p) in _HTTP_TARGETS
+            _check_http(client, n, b, p) for (n, b, p) in _http_targets()
         ]
         osrm_checks = [
             _check_osrm(client, "osrm-foot", settings.OSRM_FOOT_BASE_URL),

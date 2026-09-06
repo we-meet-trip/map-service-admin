@@ -52,7 +52,7 @@ export function OverviewPage() {
   const gemini = data.gemini_quota;
   const geminiRatio =
     gemini && gemini.daily_cap > 0 ? gemini.daily_remaining / gemini.daily_cap : 1;
-  const dlqLen = data.streams?.dlq.length ?? 0;
+  const dlqLen = data.streams?.dlq?.length;
 
   const healthColumns: Column<HealthItem>[] = [
     {
@@ -181,15 +181,15 @@ export function OverviewPage() {
         />
         <StatTile
           label="DLQ 길이"
-          value={formatNumber(dlqLen)}
-          hint={dlqLen > 0 ? '확인 필요' : '비어 있음'}
-          tone={dlqLen > 0 ? 'critical' : 'good'}
+          value={dlqLen === undefined ? '—' : formatNumber(dlqLen)}
+          hint={dlqLen === undefined ? '조회 불가' : dlqLen > 0 ? '확인 필요' : '비어 있음'}
+          tone={dlqLen === undefined ? 'warn' : dlqLen > 0 ? 'critical' : 'good'}
           icon={<IconJobs />}
         />
         <StatTile
           label="스트림 완료"
-          value={formatNumber(data.streams?.done.length ?? 0)}
-          hint={data.streams ? data.streams.done.stream : '데이터 없음'}
+          value={data.streams?.done ? formatNumber(data.streams.done.length) : '—'}
+          hint={data.streams?.done?.stream ?? '조회 불가'}
           tone="neutral"
           icon={<IconDatabase />}
         />

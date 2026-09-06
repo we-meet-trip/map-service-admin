@@ -113,7 +113,11 @@ async def ops_overview() -> dict:
             out[key] = await coro
         except Exception as exc:  # DB 미가용 등 → 섹션만 에러
             out[key] = None
-            out["errors"][key] = f"{type(exc).__name__}: {exc}"
+            out["errors"][key] = type(exc).__name__
     out["gemini_quota"] = await redis_probe.gemini_quota()
     out["streams"] = await redis_probe.streams_overview()
+    for key in ("gemini_quota", "streams"):
+        if isinstance(out[key], dict) and out[key].get("error"):
+            out["errors"][key] = str(out[key]["error"])
+            out[key] = None
     return out
