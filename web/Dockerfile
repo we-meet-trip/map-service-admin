@@ -16,6 +16,9 @@ RUN npm run build
 # ---- serve stage ----------------------------------------------------------
 FROM nginx:alpine AS serve
 
+# Apply published Alpine security fixes newer than the nginx base image.
+RUN apk upgrade --no-cache
+
 # Replace the default site with our SPA + /api proxy config.
 RUN rm -f /etc/nginx/conf.d/default.conf
 COPY nginx.conf /etc/nginx/conf.d/default.conf
