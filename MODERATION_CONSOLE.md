@@ -50,3 +50,6 @@ Validation: Python auth/role/environment/audit-failure/error-redaction tests;
 contains a separate real Admin control DB + Admin proxy + User PostgreSQL/Redis/JAR
 trial. Browser fixture evidence and real proxy evidence are reported separately.
 No GCP/NCP deployment or real-account operation is implied by these local checks.
+
+## Management token isolation
+For co-host mode set `USER_ADMIN_INTERNAL_TOKEN` only in Admin and User. For central mode every `ADMIN_TARGETS` entry must carry its own `USER_ADMIN_INTERNAL_TOKEN`; it never inherits the co-host/default secret. Missing, blank, or ordinary `INTERNAL_SERVICE_TOKEN` reuse stops User management calls before any network request. Login/readiness and Hub requests remain independent. The selected target URL is validated and redirects are never followed with the management credential. Rotate the selected Admin target and its User service together, retaining paired rollback configuration without printing or checking secrets into Git.

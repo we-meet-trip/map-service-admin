@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from app import audit
 from app.config import environment_name, settings
 from app.security import require_operator
-from app.upstream import UpstreamError, UpstreamUnavailable, request_json
+from app.upstream import UpstreamError, UpstreamUnavailable, request_user_admin_json as request_json
 
 router = APIRouter(prefix="/api/v1/moderation", tags=["moderation"])
 Status = Literal["OPEN", "IN_REVIEW", "ACTIONED", "DISMISSED"]

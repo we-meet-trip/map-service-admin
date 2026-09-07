@@ -97,8 +97,9 @@ class Settings(BaseSettings):
     STREAM_GROUP: str = "bff-result"
     REDIS_TIMEOUT_SEC: float = 2.0
 
-    # [내부 위임] hub/BFF `/internal` 아웃바운드 토큰(공유 비밀 재사용).
+    # [내부 위임] 일반 Hub와 User 관리자 권한은 별도 비밀이다.
     INTERNAL_SERVICE_TOKEN: SecretStr = SecretStr("")
+    USER_ADMIN_INTERNAL_TOKEN: SecretStr = SecretStr("")
     INTERNAL_TIMEOUT_SEC: float = 5.0
 
     # [Gemini 연결 점검] 무료 메타 호출(models.list). 생성 미사용.
@@ -135,12 +136,12 @@ _target_name: ContextVar[str | None] = ContextVar("admin_target_name", default=N
 _TARGET_FIELDS = {
     "ADMIN_DATABASE_URL", "ADMIN_REDIS_URL", "USER_BASE_URL", "AGENT_BASE_URL",
     "HUB_BASE_URL", "OSRM_FOOT_BASE_URL", "OSRM_BICYCLE_BASE_URL",
-    "INTERNAL_SERVICE_TOKEN", "GEMINI_API_KEY", "KAKAO_REST_API_KEY",
+    "INTERNAL_SERVICE_TOKEN", "USER_ADMIN_INTERNAL_TOKEN", "GEMINI_API_KEY", "KAKAO_REST_API_KEY",
     "KMA_SERVICE_KEY", "TOUR_API_SERVICE_KEY", "NAVER_CLIENT_ID",
     "NAVER_CLIENT_SECRET", "MONITORING_PANELS", "GEMINI_RPD_CAP",
 }
 _TARGET_SECRETS = {
-    "INTERNAL_SERVICE_TOKEN", "GEMINI_API_KEY", "KAKAO_REST_API_KEY",
+    "INTERNAL_SERVICE_TOKEN", "USER_ADMIN_INTERNAL_TOKEN", "GEMINI_API_KEY", "KAKAO_REST_API_KEY",
     "KMA_SERVICE_KEY", "TOUR_API_SERVICE_KEY", "NAVER_CLIENT_ID", "NAVER_CLIENT_SECRET",
 }
 
