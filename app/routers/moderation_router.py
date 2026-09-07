@@ -26,7 +26,7 @@ REVIEW_ACTIONS = {"REVIEW", "DISMISS", "RESOLVE"}
 class ReportReceipt(BaseModel):
     report_id: UUID
     status: Status
-    content_type: Literal["CHAT_MESSAGE", "TRIP", "VISION"]
+    content_type: Literal["CHAT_MESSAGE", "TRIP", "VISION", "REVIEW_SUMMARY"]
     reason: str = Field(max_length=32)
     resolution: str | None = Field(default=None, max_length=24)
     created_at: datetime

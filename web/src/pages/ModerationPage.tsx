@@ -10,6 +10,7 @@ type Action = 'REVIEW' | 'DISMISS' | 'RESOLVE' | 'HIDE_CHAT_MESSAGE' | 'RESTRICT
 interface Report { report_id: string; status: Status; content_type: string; reason: string; resolution: string | null; created_at: string; updated_at: string }
 interface Detail { report: Report; description: string | null; current_message: string | null; room_id: number | null; message_seq: number | null; schedule_id: number | null; recommend_job_id: string | null; actions: { action_id: string; action: Action; admin_actor: string; restriction_hours: number | null; created_at: string }[] }
 const labels: Record<Action, string> = { REVIEW: '검토 시작', DISMISS: '위반 없음으로 종결', RESOLVE: '대응 완료', HIDE_CHAT_MESSAGE: '이 메시지 숨김', RESTRICT_CHAT: '발신자 채팅 전송 제한', LIFT_CHAT_RESTRICTION: '발신자 채팅 제한 해제' };
+const contentLabels: Record<string, string> = { CHAT_MESSAGE: '채팅 메시지', TRIP: '생성 일정', VISION: 'Vision 결과', REVIEW_SUMMARY: '리뷰 요약' };
 const states: Record<Status, string> = { OPEN: '접수', IN_REVIEW: '검토 중', ACTIONED: '조치 완료', DISMISSED: '종결' };
 
 export function ModerationPage() {
@@ -55,7 +56,7 @@ export function ModerationPage() {
   return <div className="space-y-5">
     <PageHeader title="콘텐츠 신고 처리" />
     <p className="text-sm text-fg-muted">대상 환경: <strong>{environment}</strong>. 접수 목록, 원문 검토, 제재 권한을 구분합니다. 원문은 열람을 기록하며 이 화면을 닫으면 캐시에서 제거됩니다.</p>
-    <p className="text-sm text-fg-muted">위협·괴롭힘·혐오·성착취·불법행위·개인정보 노출·스팸을 검토하세요. 자동 생성 일정과 Vision의 부정확하거나 위험한 결과도 처리 대상입니다. Vision 신고는 사용자 설명만 보관합니다.</p>
+    <p className="text-sm text-fg-muted">위협·괴롭힘·혐오·성착취·불법행위·개인정보 노출·스팸을 검토하세요. 자동 생성 일정, Vision, 리뷰 요약의 부정확하거나 위험한 결과도 처리 대상입니다. Vision·리뷰 요약 신고는 사용자 설명만 보관합니다.</p>
     {(error || queue.error || detail.error) ? <ErrorBanner error={error || queue.error || detail.error} /> : null}
     <label className="block">상태 <select aria-label="신고 상태" className="rounded border border-border bg-bg p-2" value={status}
       onChange={(event) => { setStatus(event.target.value as Status); setSelected(null); setConfirmed(null); }}>
@@ -65,7 +66,7 @@ export function ModerationPage() {
     <div className="overflow-auto rounded border border-border"><table className="w-full text-left text-sm">
       <thead><tr><th className="p-3">접수 시각</th><th>종류</th><th>사유</th><th>상태</th><th>검토</th></tr></thead>
       <tbody>{queue.data?.map((item) => <tr key={item.report_id} className="border-t border-border">
-        <td className="p-3">{new Date(item.created_at).toLocaleString()}</td><td>{item.content_type}</td><td>{item.reason}</td><td>{states[item.status]}</td>
+        <td className="p-3">{new Date(item.created_at).toLocaleString()}</td><td>{contentLabels[item.content_type] ?? item.content_type}</td><td>{item.reason}</td><td>{states[item.status]}</td>
         <td>{canReview ? <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => choose(item.report_id)}>검토 열기</button> : '검토 권한 필요'}</td>
       </tr>)}</tbody></table></div>
     {selected && <section className="space-y-4 rounded border border-border bg-surface p-4" aria-label="신고 상세">
@@ -78,6 +79,7 @@ export function ModerationPage() {
         {detail.data.report.content_type === 'CHAT_MESSAGE' && <><h3 className="font-medium">대상 메시지 (현재 저장 내용)</h3>
           <p className="whitespace-pre-wrap break-words">{detail.data.current_message ?? '대상 내용이 삭제되었습니다.'}</p></>}
         {detail.data.report.content_type === 'TRIP' && <p className="break-all text-sm">일정 참조: {detail.data.schedule_id ?? detail.data.recommend_job_id ?? '삭제됨'}. 확인한 문제는 서비스 개선·안내 후 대응 완료로 처리하세요.</p>}
+        {['VISION', 'REVIEW_SUMMARY'].includes(detail.data.report.content_type) && <p className="text-sm text-fg-muted">사용자가 제공한 설명입니다. 실제 생성 원문이나 작성자를 검증한 기록이 아닙니다. 신고 내용을 검토하고 서비스 개선·안내 후 대응 완료 또는 기각으로 처리하세요.</p>}
         <div className="flex flex-wrap gap-2">
           {active && canReview && (['REVIEW', 'DISMISS', 'RESOLVE'] as Action[]).map((action) => <button key={action} className="btn btn-ghost" disabled={busy || detail.isFetching} onClick={() => setConfirmed(action)}>{labels[action]}</button>)}
           {active && canEnforce && row?.content_type === 'CHAT_MESSAGE' && <>

@@ -6,10 +6,10 @@ const assert = require('node:assert/strict');
 const { chromium } = require('playwright-core');
 const root = path.resolve(__dirname, '../web/dist');
 const reportId = '00000000-0000-4000-8000-000000000017';
-let role = 'owner', state = 'OPEN', resolution = null;
+let role = 'owner', state = 'OPEN', resolution = null, contentType = 'CHAT_MESSAGE';
 const calls = [], environmentHeaders = [], errors = [];
 let failFirst = true;
-const receipt = () => ({ report_id: reportId, content_type: 'CHAT_MESSAGE', reason: 'OTHER', status: state, resolution,
+const receipt = () => ({ report_id: reportId, content_type: contentType, reason: 'OTHER', status: state, resolution,
   created_at: '2026-09-07T00:00:00Z', updated_at: '2026-09-07T00:00:00Z' });
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
@@ -67,7 +67,19 @@ const server = http.createServer(async (req, res) => {
     assert.equal(await page.getByRole('button', { name: '이 메시지 숨김', exact: true }).count(), 0);
     assert.equal(await page.getByRole('button', { name: '발신자 채팅 전송 제한', exact: true }).count(), 0);
     assert.equal(await page.getByRole('button', { name: '검토 시작', exact: true }).count(), 1);
+    role = 'owner'; state = 'OPEN'; resolution = null; contentType = 'REVIEW_SUMMARY';
+    await page.reload();
+    await page.getByRole('cell', { name: '리뷰 요약', exact: true }).waitFor();
+    await page.getByRole('button', { name: '검토 열기', exact: true }).click();
+    await page.getByText(/실제 생성 원문이나 작성자를 검증한 기록이 아닙니다/).waitFor();
+    assert.equal(await page.getByRole('button', { name: '이 메시지 숨김', exact: true }).count(), 0);
+    assert.equal(await page.getByRole('button', { name: '발신자 채팅 전송 제한', exact: true }).count(), 0);
+    assert.equal(await page.getByRole('button', { name: '검토 시작', exact: true }).count(), 1);
+    await page.getByRole('button', { name: '대응 완료', exact: true }).click();
+    await page.getByRole('button', { name: '확인 후 실행', exact: true }).click();
+    await page.getByText('현재 상태: 조치 완료 / RESOLVE', { exact: true }).waitFor();
+    assert.equal(calls.at(-1).action, 'RESOLVE');
     assert(environmentHeaders.every(value => value === 'test')); assert.deepEqual(errors, []);
-    console.log(JSON.stringify({ result: 'passed', checks: ['owner review', 'escaped content', 'explicit environment', 'confirmation before mutation', 'same UUID on retry', 'updated outcome', 'close clears original', 'viewer metadata only', 'operator no enforcement', 'no browser errors'], backend: 'synthetic HTTP fixture', request_count: environmentHeaders.length }));
+    console.log(JSON.stringify({ result: 'passed', checks: ['owner review', 'escaped content', 'explicit environment', 'confirmation before mutation', 'same UUID on retry', 'updated outcome', 'close clears original', 'viewer metadata only', 'operator no enforcement', 'review summary reporter explanation', 'summary owner cannot hide or restrict', 'summary resolved', 'no browser errors'], backend: 'synthetic HTTP fixture', request_count: environmentHeaders.length }));
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 })().catch(error => { console.error(JSON.stringify({ result: 'failed', cause: error.name, detail: error.message })); process.exitCode = 1; server.close(); });

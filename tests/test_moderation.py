@@ -132,5 +132,34 @@ def test_malformed_upstream_content_is_not_exposed_by_validation_errors(harness,
     monkeypatch.setattr(route, "request_json", malformed)
     result=client.get(BASE+f"/{REPORT}",headers=HEADERS)
     assert result.status_code==502 and "private unexpected" not in result.text
+
     result=client.get(BASE,headers=HEADERS)
     assert result.status_code==502 and "private unexpected" not in result.text
+
+
+def test_review_summary_report_queue_detail_and_review_actions(harness, monkeypatch):
+    client, state = harness
+    summary = {**receipt(), "content_type": "REVIEW_SUMMARY"}
+    async def request(method, url, **kwargs):
+        state["calls"].append((method, url, kwargs))
+        if method == "POST": return summary
+        if url.endswith(str(REPORT)):
+            return {"report": summary, "description": "synthetic reporter explanation", "actions": []}
+        return [summary]
+    monkeypatch.setattr(route, "request_json", request)
+    state["role"] = "viewer"
+    queue = client.get(BASE, headers=HEADERS)
+    assert queue.status_code == 200 and queue.json()[0]["content_type"] == "REVIEW_SUMMARY"
+    assert "description" not in queue.json()[0]
+    assert client.get(BASE + f"/{REPORT}", headers=HEADERS).status_code == 403
+    state["role"] = "operator"
+    detail = client.get(BASE + f"/{REPORT}", headers=HEADERS)
+    assert detail.status_code == 200 and detail.headers["cache-control"] == "no-store"
+    assert detail.json()["current_message"] is None
+    for action in ["REVIEW", "DISMISS", "RESOLVE"]:
+        response = client.post(BASE + f"/{REPORT}/actions", headers=HEADERS,
+                               json={"action_id": str(uuid4()), "action": action})
+        assert response.status_code == 200 and response.json()["content_type"] == "REVIEW_SUMMARY"
+    assert client.post(BASE + f"/{REPORT}/actions", headers=HEADERS,
+                       json={"action_id": str(uuid4()), "action": "HIDE_CHAT_MESSAGE"}).status_code == 403
+    assert "synthetic reporter explanation" not in str(state["audit"])
