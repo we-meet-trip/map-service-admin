@@ -22,9 +22,10 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import HTMLResponse, JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
+from sqlalchemy.exc import SQLAlchemyError
 
 from app import accounts, audit
-from app.config import settings, control_settings, select_environment, reset_environment
+from app.config import settings, control_settings, select_environment, select_control, reset_environment
 from app.db import dispose_engine
 from app.routers import (
     actions_router,
@@ -49,10 +50,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     uvicorn 기동 전에 이미 수행한다(entrypoint.sh).
     """
     logger.info("admin: startup")
-    # 잘못된 대상은 요청이 오기 전에 드러나게 한다.
-    for name in control_settings.ADMIN_TARGETS:
-        token = select_environment(name)
-        reset_environment(token)
+    # Target configuration/outages cannot stop central authentication.
     await accounts.bootstrap_if_empty()
     try:
         yield
@@ -71,13 +69,23 @@ app = FastAPI(
 )
 
 
+@app.exception_handler(SQLAlchemyError)
+async def database_unavailable(request: Request, exc: SQLAlchemyError):
+    # Exception text may include DSNs/query parameters. Never send it to clients.
+    return JSONResponse({"detail": "database unavailable"}, status_code=503)
+
+
 @app.middleware("http")
 async def target_environment(request: Request, call_next):
     name = request.headers.get("X-Map-Environment") or request.query_params.get("environment") or control_settings.ADMIN_ENVIRONMENT
-    if request.url.path.startswith("/api/v1/auth/") or request.url.path == "/api/v1/environments":
+    control_request = (
+        request.url.path.startswith(("/api/v1/auth/", "/api/v1/operators"))
+        or request.url.path in {"/api/v1/environments", "/health", "/health/ready", "/metrics"}
+    )
+    if control_request:
         name = control_settings.ADMIN_ENVIRONMENT
     try:
-        tokens = select_environment(name)
+        tokens = select_control() if control_request else select_environment(name)
     except ValueError:
         return JSONResponse({"detail": "unknown or incomplete environment"}, status_code=400)
     try:
@@ -123,6 +131,8 @@ app.include_router(jobs_router.router)
 app.include_router(actions_router.router)
 app.include_router(audit_router.router)
 app.include_router(operators_router.router)
+from app.routers import moderation_router
+app.include_router(moderation_router.router)
 
 
 @app.get("/health", include_in_schema=False)

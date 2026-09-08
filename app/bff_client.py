@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.config import settings
-from app.upstream import request_json
+from app.upstream import request_user_admin_json as request_json
 
 
 def _base() -> str:

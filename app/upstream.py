@@ -12,6 +12,8 @@ admin 은 hub_data 쓰기·회원/잡/DLQ 조작을 소유 서비스 `/internal`
 from __future__ import annotations
 
 from typing import Any
+import secrets
+import re
 
 import httpx
 
@@ -31,9 +33,25 @@ class UpstreamUnavailable(Exception):
     """업스트림 연결 실패/타임아웃(→ 502)."""
 
 
-def _headers() -> dict[str, str]:
-    token = settings.INTERNAL_SERVICE_TOKEN.get_secret_value()
+def _headers(*, user_admin: bool = False) -> dict[str, str]:
+    ordinary = settings.INTERNAL_SERVICE_TOKEN.get_secret_value()
+    token = settings.USER_ADMIN_INTERNAL_TOKEN.get_secret_value() if user_admin else ordinary
+    if user_admin and (not token.strip() or secrets.compare_digest(token.encode("utf-8"), ordinary.encode("utf-8"))):
+        raise UpstreamUnavailable("dedicated user administration credential unavailable")
     return {"X-Internal-Token": token} if token else {}
+
+
+def _user_admin_url(url: str) -> bool:
+    candidate = httpx.URL(url)
+    base = httpx.URL(settings.USER_BASE_URL.rstrip("/") + "/internal/admin/")
+    return (candidate.scheme, candidate.host, candidate.port) == (base.scheme, base.host, base.port) and candidate.path.startswith(base.path) and not candidate.userinfo and not candidate.fragment and "%" not in candidate.raw_path.decode("ascii")
+
+
+async def request_user_admin_json(method: str, url: str, **kwargs) -> Any:
+    """The management secret is restricted to the selected User management endpoint."""
+    if not _user_admin_url(url):
+        raise UpstreamUnavailable("invalid user administration destination")
+    return await request_json(method, url, _user_admin=True, **kwargs)
 
 
 async def request_json(
@@ -42,20 +60,31 @@ async def request_json(
     *,
     params: dict[str, Any] | None = None,
     json: Any | None = None,
+    admin_actor: str | None = None,
+    _user_admin: bool = False,
 ) -> Any:
     """내부 위임 호출. 2xx 면 JSON, 4xx/5xx 면 UpstreamError, 연결오류면
     UpstreamUnavailable 를 발생."""
+    if _user_admin and not _user_admin_url(url):
+        raise UpstreamUnavailable("invalid user administration destination")
+    if not _user_admin and _user_admin_url(url):
+        raise UpstreamUnavailable("user administration requires dedicated credential")
+    headers = _headers(user_admin=_user_admin)
+    if admin_actor is not None:
+        if not re.fullmatch(r"admin_[1-9][0-9]*", admin_actor):
+            raise ValueError("invalid opaque admin actor")
+        headers["X-Admin-Actor"] = admin_actor
     try:
         async with httpx.AsyncClient(
-            timeout=settings.INTERNAL_TIMEOUT_SEC
+            timeout=settings.INTERNAL_TIMEOUT_SEC, follow_redirects=False
         ) as client:
             resp = await client.request(
-                method, url, params=params, json=json, headers=_headers()
+                method, url, params=params, json=json, headers=headers
             )
     except httpx.HTTPError as exc:
-        raise UpstreamUnavailable(str(exc)) from exc
+        raise UpstreamUnavailable(type(exc).__name__) from exc
 
-    if resp.status_code >= 400:
+    if resp.status_code >= 300:
         try:
             payload = resp.json()
         except Exception:

@@ -21,6 +21,7 @@ export interface NavItem {
 }
 
 export const NAV_ITEMS: NavItem[] = [
+  { to: '/moderation', label: '콘텐츠 신고', icon: <IconAudit />, description: '신고 검토 · 메시지 숨김 · 채팅 제한' },
   { to: '/operators', label: '운영자 계정', icon: <IconUsers />, description: '개인 계정 · 환경 권한 · 세션 회수' },
   {
     to: '/',

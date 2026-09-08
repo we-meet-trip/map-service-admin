@@ -23,7 +23,15 @@ WORKDIR /app
 COPY --from=builder /wheels /wheels
 COPY requirements.txt .
 RUN pip install --no-cache-dir --no-index --find-links=/wheels -r requirements.txt \
+ && pip check \
  && rm -rf /wheels
+# Immutable serving images do not invoke Perl or account-management tools.
+# Remove the installed package (including its dpkg record), never just scanner metadata.
+# This runs only after all apt/user creation steps; do not run it on a serving host.
+RUN apt-get purge -y --allow-remove-essential perl-base \
+ && find /usr/bin /usr/sbin -xdev -type f -perm /6000 -exec chmod a-s {} + \
+ && test ! -e /usr/bin/perl \
+ && test -z "$(find /usr/bin /usr/sbin -xdev -type f -perm /6000 -print -quit)"
 # 애플리케이션 소스 + 마이그레이션(alembic.ini/migrations) + 엔트리포인트.
 # 소유자를 app:app 로 지정. entrypoint.sh 는 실행 권한 부여.
 COPY --chown=app:app app ./app
