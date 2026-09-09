@@ -22,5 +22,5 @@ async def proxied(awaitable: Awaitable[Any]) -> Any:
     except UpstreamUnavailable as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"upstream unavailable: {exc}",
+            detail={"code": "upstream_unavailable", "message": "대상 서비스에 연결할 수 없습니다."},
         ) from exc

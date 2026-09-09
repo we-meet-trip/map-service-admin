@@ -2,7 +2,7 @@ import asyncio
 import httpx
 import pytest
 from pydantic import SecretStr
-from app import bff_client, upstream
+from app import bff_client, hub_client, upstream
 from app.config import control_settings, select_environment, reset_environment
 
 
@@ -16,6 +16,7 @@ def transport(monkeypatch):
     monkeypatch.setattr(upstream.httpx,"AsyncClient",lambda **kwargs: factory(transport=httpx.MockTransport(respond),**kwargs))
     monkeypatch.setattr(control_settings,"INTERNAL_SERVICE_TOKEN",SecretStr("synthetic-serving"))
     monkeypatch.setattr(control_settings,"USER_ADMIN_INTERNAL_TOKEN",SecretStr("synthetic-admin"))
+    monkeypatch.setattr(control_settings,"HUB_ADMIN_INTERNAL_TOKEN",SecretStr("synthetic-hub-admin"))
     return calls
 
 
@@ -31,6 +32,55 @@ def test_all_bff_operations_use_dedicated_management_credential(transport):
     asyncio.run(run())
     assert len(transport)==7
     assert all(r.headers["X-Internal-Token"]=="synthetic-admin" for r in transport)
+
+
+def test_all_hub_operations_use_dedicated_management_credential(transport):
+    async def run():
+        await hub_client.kma_run_now("short")
+        await hub_client.toggle_grid(1, True)
+        await hub_client.list_forbidden_zones()
+        await hub_client.get_forbidden_zone(1)
+        await hub_client.create_forbidden_zone({})
+        await hub_client.update_forbidden_zone(1, {})
+        await hub_client.delete_forbidden_zone(1)
+    asyncio.run(run())
+    assert len(transport) == 7
+    assert all(r.headers["X-Internal-Token"] == "synthetic-hub-admin" for r in transport)
+
+
+@pytest.mark.parametrize("token", ["", " ", "synthetic-serving", "synthetic-admin"])
+def test_hub_missing_or_shared_token_never_opens_network(transport, monkeypatch, token):
+    monkeypatch.setattr(control_settings, "HUB_ADMIN_INTERNAL_TOKEN", SecretStr(token))
+    with pytest.raises(upstream.UpstreamUnavailable):
+        asyncio.run(hub_client.list_forbidden_zones())
+    assert not transport
+
+
+@pytest.mark.parametrize("path", ["/public", "/internal/kma/other", "/internal/grids/1/extra",
+                                  "/internal/forbidden-zones/../ordinary", "/internal/forbidden-zones#fragment"])
+def test_hub_credential_never_leaves_explicit_paths(transport, path):
+    with pytest.raises(upstream.UpstreamUnavailable):
+        asyncio.run(upstream.request_hub_admin_json("GET", control_settings.HUB_BASE_URL + path))
+    assert not transport
+
+
+def test_plain_helper_cannot_call_hub_management_path(transport):
+    with pytest.raises(upstream.UpstreamUnavailable):
+        asyncio.run(upstream.request_json("GET", control_settings.HUB_BASE_URL + "/internal/forbidden-zones"))
+    assert not transport
+
+
+def test_target_cannot_inherit_control_hub_management_credential(transport, monkeypatch):
+    monkeypatch.setattr(control_settings, "ADMIN_TARGETS", {"prod": {
+        "USER_BASE_URL": "https://prod.example/user", "HUB_BASE_URL": "https://prod.example/hub",
+        "AGENT_BASE_URL": "https://prod.example/agent", "INTERNAL_SERVICE_TOKEN": "synthetic-prod-serving"}})
+    context = select_environment("prod")
+    try:
+        with pytest.raises(upstream.UpstreamUnavailable):
+            asyncio.run(hub_client.list_forbidden_zones())
+        assert not transport
+    finally:
+        reset_environment(context)
 
 
 @pytest.mark.parametrize("token",[""," ","synthetic-serving"])
