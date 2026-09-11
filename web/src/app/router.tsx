@@ -13,6 +13,7 @@ import { AuditPage } from '../pages/AuditPage';
 import { MonitoringPage } from '../pages/MonitoringPage';
 import { NotFoundPage } from '../pages/NotFoundPage';
 import { OperatorsPage } from '../pages/OperatorsPage';
+import { ModerationPage } from '../pages/ModerationPage';
 
 export const router = createBrowserRouter([
   {
@@ -32,6 +33,7 @@ export const router = createBrowserRouter([
           { path: 'audit', element: <AuditPage /> },
           { path: 'monitoring', element: <MonitoringPage /> },
           { path: 'operators', element: <OperatorsPage /> },
+          { path: 'moderation', element: <ModerationPage /> },
           { path: '*', element: <NotFoundPage /> },
         ],
       },

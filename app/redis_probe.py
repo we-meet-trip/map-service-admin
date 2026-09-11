@@ -36,6 +36,8 @@ def _client(db: int) -> aioredis.Redis:
 
 async def streams_overview() -> dict[str, Any]:
     """DB2 스트림 길이 + DLQ 길이 + done 그룹 PEL 요약."""
+    if not settings.ADMIN_REDIS_URL:
+        return {"error": "not_configured", "configured": False}
     r = _client(settings.REDIS_DB_STREAMS)
     try:
         done_len = await r.xlen(settings.STREAM_DONE)
@@ -63,14 +65,16 @@ async def streams_overview() -> dict[str, Any]:
             "pending": pending,
         }
     except Exception as exc:
-        logger.warning("streams_overview failed: %s", exc)
-        return {"error": type(exc).__name__, "detail": str(exc)}
+        logger.warning("streams_overview failed: %s", type(exc).__name__)
+        return {"error": type(exc).__name__}
     finally:
         await r.aclose()
 
 
 async def gemini_quota() -> dict[str, Any]:
     """DB3 Gemini 일일 사용량(KST) vs 상한 + RPM 토큰 버킷 스냅샷."""
+    if not settings.ADMIN_REDIS_URL:
+        return {"error": "not_configured", "configured": False}
     r = _client(settings.REDIS_DB_RATELIMIT)
     try:
         today = datetime.now(_KST).strftime("%Y%m%d")
@@ -86,8 +90,8 @@ async def gemini_quota() -> dict[str, Any]:
             "rpm_bucket": tokens or {},
         }
     except Exception as exc:
-        logger.warning("gemini_quota failed: %s", exc)
-        return {"error": type(exc).__name__, "detail": str(exc)}
+        logger.warning("gemini_quota failed: %s", type(exc).__name__)
+        return {"error": type(exc).__name__}
     finally:
         await r.aclose()
 
@@ -102,6 +106,8 @@ async def _count_prefix(r: aioredis.Redis, pattern: str) -> int:
 
 async def cache_stats() -> dict[str, Any]:
     """DB4 외부 API 캐시 키 수(kakao/naver/osrm)."""
+    if not settings.ADMIN_REDIS_URL:
+        return {"error": "not_configured", "configured": False}
     r = _client(settings.REDIS_DB_CACHE)
     try:
         return {
@@ -110,7 +116,7 @@ async def cache_stats() -> dict[str, Any]:
             "osrm": await _count_prefix(r, "osrm:*"),
         }
     except Exception as exc:
-        logger.warning("cache_stats failed: %s", exc)
-        return {"error": type(exc).__name__, "detail": str(exc)}
+        logger.warning("cache_stats failed: %s", type(exc).__name__)
+        return {"error": type(exc).__name__}
     finally:
         await r.aclose()

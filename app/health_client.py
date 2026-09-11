@@ -74,6 +74,8 @@ async def _check_http(
 
 async def _check_postgres() -> dict[str, Any]:
     """postgres 헬스: SELECT 1 왕복 시간."""
+    if not settings.ADMIN_DATABASE_URL:
+        return {"service": "postgres", "kind": "infra", "ok": None, "configured": False}
     started = time.perf_counter()
     try:
         async with get_engine().connect() as conn:
@@ -91,6 +93,8 @@ async def _check_postgres() -> dict[str, Any]:
 
 async def _check_redis() -> dict[str, Any]:
     """redis 헬스: PING 왕복 시간(DB0)."""
+    if not settings.ADMIN_REDIS_URL:
+        return {"service": "redis", "kind": "infra", "ok": None, "configured": False}
     started = time.perf_counter()
     r = aioredis.from_url(
         settings.ADMIN_REDIS_URL,

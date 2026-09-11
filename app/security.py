@@ -41,7 +41,8 @@ async def require_operator(request: Request) -> str:
         if request.headers.get("X-Map-Environment") != environment_name():
             raise HTTPException(403, "explicit environment header required")
         # 서비스 액션보다 먼저 감사 저장 성공을 확인한다.
-        request.state.audit_id = await audit.record(operator, "request.started",
+        actor = f"admin_{int(permissions['id'])}" if request.url.path.startswith("/api/v1/moderation/") else operator
+        request.state.audit_id = await audit.record(actor, "request.started",
             target_service="admin", target_id=request.url.path,
             params={"method": request.method}, status="started")
     return operator

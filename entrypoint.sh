@@ -13,8 +13,12 @@
 # =========================================================================
 set -eu
 
-echo "entrypoint: applying admin_data migrations (alembic upgrade head)"
-alembic upgrade head
+# Central runtime does not need or receive DDL credentials. Migration is a separate job.
+if [ "${ADMIN_RUN_MIGRATIONS:-auto}" = "true" ] || { [ "${ADMIN_RUN_MIGRATIONS:-auto}" = "auto" ] && [ -z "${ADMIN_CONTROL_DATABASE_URL:-}" ]; }; then
+    echo "entrypoint: applying admin_data migrations"
+    alembic upgrade head
+fi
+unset ADMIN_CONTROL_MIGRATION_DATABASE_URL
 
 echo "entrypoint: starting uvicorn"
 exec uvicorn app.main:app --host 0.0.0.0 --port 8000
