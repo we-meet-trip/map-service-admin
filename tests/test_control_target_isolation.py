@@ -5,7 +5,7 @@ os.environ.setdefault("ADMIN_DATABASE_URL", "postgresql+psycopg://legacy:x@local
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from app import accounts, db
+from app import accounts, audit, db
 from app.config import control_settings, settings, select_environment, reset_environment
 from app.main import app
 
@@ -37,9 +37,12 @@ def test_control_lifespan_and_login_survive_missing_or_invalid_default_target(mo
     async def bootstrap(): calls.append("bootstrap")
     async def allowed(*_): return True
     async def auth(*_): return None
+    async def recorded(*_a, **_k): return 1
     monkeypatch.setattr(accounts, "bootstrap_if_empty", bootstrap)
     monkeypatch.setattr(accounts, "login_allowed", allowed)
     monkeypatch.setattr(accounts, "authenticate", auth)
+    # 접속 기록은 대상 환경이 아니라 control DB 에 남는다. 여기서는 그 저장만 대역한다.
+    monkeypatch.setattr(audit, "record", recorded)
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200
         assert client.post("/api/v1/auth/login", json={"username": "synthetic", "password": "wrong"}).status_code == 401

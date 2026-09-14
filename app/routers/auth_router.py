@@ -16,11 +16,16 @@ from fastapi import (
 )
 from pydantic import BaseModel, Field
 
-from app import accounts
+from app import accounts, audit
 from app.config import settings
 from app.security import require_operator
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
+
+
+def _request_ip(request: Request) -> str | None:
+    """요청을 받은 주소. 관문을 거치면 관문 주소이며 운영자 주소가 아니다."""
+    return request.client.host if request.client else None
 
 
 class LoginRequest(BaseModel):
@@ -43,11 +48,21 @@ def _set_session_cookie(response: Response, session_id: str) -> None:
 
 @router.post("/login")
 async def login(body: LoginRequest, response: Response, request: Request) -> dict[str, str]:
-    """자격 검증 후 세션 발급. 실패 시 401."""
-    if not await accounts.login_allowed(body.username, request.client.host if request.client else "unknown"):
+    """자격 검증 후 세션 발급. 실패 시 401.
+
+    시도 결과를 세 가지로 구분해 기록한다. 기록이 저장되지 않으면 요청도
+    실패한다 — 남지 않는 접속을 허용하지 않는다. 시도한 username 은 그대로
+    남기고 비밀번호는 어느 경로에도 넣지 않는다.
+    """
+    address = _request_ip(request)
+    if not await accounts.login_allowed(body.username, address or "unknown"):
+        await audit.record(body.username, "auth.login", target_service="admin",
+                           status="throttled", request_ip=address)
         raise HTTPException(429, "too many login attempts", headers={"Retry-After": str(settings.ADMIN_LOGIN_WINDOW_SECONDS)})
     account_id = await accounts.authenticate(body.username, body.password)
     if account_id is None:
+        await audit.record(body.username, "auth.login", target_service="admin",
+                           status="failed", request_ip=address)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid credentials",
@@ -55,6 +70,8 @@ async def login(body: LoginRequest, response: Response, request: Request) -> dic
     session_id, _ = await accounts.create_session(account_id)
     _set_session_cookie(response, session_id)
     record = await accounts.permissions(body.username)
+    await audit.record(body.username, "auth.login", target_service="admin",
+                       request_ip=address)
     return {"username": body.username, "role": record["role"] if record else "viewer"}
 
 
@@ -62,7 +79,11 @@ async def login(body: LoginRequest, response: Response, request: Request) -> dic
 async def logout(request: Request, response: Response) -> Response:
     """세션 삭제 + 쿠키 제거. 미로그인 상태여도 204."""
     session_id = request.cookies.get(settings.ADMIN_SESSION_COOKIE_NAME)
+    operator = await accounts.operator_for_session(session_id)
     await accounts.delete_session(session_id)
+    if operator is not None:
+        await audit.record(operator, "auth.logout", target_service="admin",
+                           request_ip=_request_ip(request))
     response.delete_cookie(
         key=settings.ADMIN_SESSION_COOKIE_NAME, path="/"
     )
