@@ -66,6 +66,8 @@ def test_protected_requires_session(path) -> None:
 
 def test_login_success(monkeypatch) -> None:
     async def allowed(*_): return True
+    async def recorded(*_a, **_k): return 1
+    monkeypatch.setattr(audit, "record", recorded)
     monkeypatch.setattr(accounts, "login_allowed", allowed)
     async def fake_auth(u, p):
         return 7
@@ -87,6 +89,8 @@ def test_login_success(monkeypatch) -> None:
 
 def test_login_bad_credentials(monkeypatch) -> None:
     async def allowed(*_): return True
+    async def recorded(*_a, **_k): return 1
+    monkeypatch.setattr(audit, "record", recorded)
     monkeypatch.setattr(accounts, "login_allowed", allowed)
     async def fake_auth(u, p):
         return None
